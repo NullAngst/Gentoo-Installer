@@ -16,21 +16,6 @@
 #  you confirm, the installation runs unattended. If a step fails, fix the
 #  cause and run the script again with --resume; finished steps are skipped.
 #
-#  How to run (from the official Gentoo live image, as root)
-#  ---------------------------------------------------------
-#    curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/main/gentoo-install.sh
-#    bash gentoo-install.sh
-#
-#  Do not pipe it into bash (curl ... | bash). The script is interactive and
-#  reads your answers from the keyboard.
-#
-#  Options
-#    --resume   Continue an installation that stopped because of an error
-#    --help     Show help
-#
-#  Logs
-#    /tmp/gentoo-install.log        (live system)
-#    /var/log/gentoo-install.log    (inside the new system)
 # =============================================================================
 
 set -Eeuo pipefail
@@ -90,6 +75,8 @@ init_defaults() {
     ROOT_PASSWORD=""
     USER_PASSWORD=""
     LUKS_PASSWORD=""
+    STAGE3_URL=""
+    STAGE3_FILE=""
 }
 
 # ----------------------------------------------------------------------------
@@ -443,13 +430,17 @@ valid_positive_int() {
     return 1
 }
 
+# Validators only trust live-system data after checking it is really there:
+# the Gentoo minimal ISO keeps some directories but empties them to save space
+# (for example /usr/share/zoneinfo and /usr/share/i18n).
+
 valid_keymap() {
     local k=$1
     if [[ ! $k =~ ^[A-Za-z0-9._-]+$ ]]; then
         warn "That does not look like a keymap name."
         return 1
     fi
-    if [[ -d /usr/share/keymaps ]]; then
+    if find /usr/share/keymaps -name 'us.map*' -print -quit 2>/dev/null | grep -q .; then
         if find /usr/share/keymaps -name "${k}.map*" -print -quit 2>/dev/null | grep -q .; then
             return 0
         fi
@@ -464,7 +455,7 @@ valid_xkb_layout() {
         warn "XKB layout names are short lowercase codes such as us, gb, de, fr, es, ch, latam. Console keymap names like 'de-latin1' do not work here."
         return 1
     fi
-    if [[ -d /usr/share/X11/xkb/symbols && ! -f /usr/share/X11/xkb/symbols/$1 ]]; then
+    if [[ -f /usr/share/X11/xkb/symbols/us && ! -f /usr/share/X11/xkb/symbols/$1 ]]; then
         warn "XKB layout '$1' was not found in /usr/share/X11/xkb/symbols."
         return 1
     fi
@@ -477,33 +468,139 @@ valid_locale() {
         warn "Use the form language_COUNTRY.UTF-8, for example en_US.UTF-8, en_GB.UTF-8, de_DE.UTF-8."
         return 1
     fi
-    if [[ -r /usr/share/i18n/SUPPORTED ]] && ! grep -q "^${l} " /usr/share/i18n/SUPPORTED; then
+    if [[ -r /usr/share/i18n/SUPPORTED ]] && grep -q '^en_US.UTF-8 ' /usr/share/i18n/SUPPORTED \
+        && ! grep -q "^${l} " /usr/share/i18n/SUPPORTED; then
         warn "Locale '${l}' is not in the list of supported locales (/usr/share/i18n/SUPPORTED)."
         return 1
     fi
     return 0
 }
 
+# Canonical timezone names (tzdata 2026a, zone1970.tab, plus UTC). Used for
+# browsing and checking when the live system has no timezone database, which is
+# the case on the Gentoo minimal ISO. The new system's own database is checked
+# again during installation.
+BUILTIN_TIMEZONES=(
+    UTC Africa/Abidjan Africa/Algiers Africa/Bissau Africa/Cairo Africa/Casablanca Africa/Ceuta
+    Africa/El_Aaiun Africa/Johannesburg Africa/Juba Africa/Khartoum Africa/Lagos Africa/Maputo
+    Africa/Monrovia Africa/Nairobi Africa/Ndjamena Africa/Sao_Tome Africa/Tripoli Africa/Tunis
+    Africa/Windhoek America/Adak America/Anchorage America/Araguaina
+    America/Argentina/Buenos_Aires America/Argentina/Catamarca America/Argentina/Cordoba
+    America/Argentina/Jujuy America/Argentina/La_Rioja America/Argentina/Mendoza
+    America/Argentina/Rio_Gallegos America/Argentina/Salta America/Argentina/San_Juan
+    America/Argentina/San_Luis America/Argentina/Tucuman America/Argentina/Ushuaia
+    America/Asuncion America/Bahia America/Bahia_Banderas America/Barbados America/Belem
+    America/Belize America/Boa_Vista America/Bogota America/Boise America/Cambridge_Bay
+    America/Campo_Grande America/Cancun America/Caracas America/Cayenne America/Chicago
+    America/Chihuahua America/Ciudad_Juarez America/Costa_Rica America/Coyhaique America/Cuiaba
+    America/Danmarkshavn America/Dawson America/Dawson_Creek America/Denver America/Detroit
+    America/Edmonton America/Eirunepe America/El_Salvador America/Fort_Nelson America/Fortaleza
+    America/Glace_Bay America/Goose_Bay America/Grand_Turk America/Guatemala America/Guayaquil
+    America/Guyana America/Halifax America/Havana America/Hermosillo
+    America/Indiana/Indianapolis America/Indiana/Knox America/Indiana/Marengo
+    America/Indiana/Petersburg America/Indiana/Tell_City America/Indiana/Vevay
+    America/Indiana/Vincennes America/Indiana/Winamac America/Inuvik America/Iqaluit
+    America/Jamaica America/Juneau America/Kentucky/Louisville America/Kentucky/Monticello
+    America/La_Paz America/Lima America/Los_Angeles America/Maceio America/Managua
+    America/Manaus America/Martinique America/Matamoros America/Mazatlan America/Menominee
+    America/Merida America/Metlakatla America/Mexico_City America/Miquelon America/Moncton
+    America/Monterrey America/Montevideo America/New_York America/Nome America/Noronha
+    America/North_Dakota/Beulah America/North_Dakota/Center America/North_Dakota/New_Salem
+    America/Nuuk America/Ojinaga America/Panama America/Paramaribo America/Phoenix
+    America/Port-au-Prince America/Porto_Velho America/Puerto_Rico America/Punta_Arenas
+    America/Rankin_Inlet America/Recife America/Regina America/Resolute America/Rio_Branco
+    America/Santarem America/Santiago America/Santo_Domingo America/Sao_Paulo
+    America/Scoresbysund America/Sitka America/St_Johns America/Swift_Current
+    America/Tegucigalpa America/Thule America/Tijuana America/Toronto America/Vancouver
+    America/Whitehorse America/Winnipeg America/Yakutat Antarctica/Casey Antarctica/Davis
+    Antarctica/Macquarie Antarctica/Mawson Antarctica/Palmer Antarctica/Rothera Antarctica/Troll
+    Antarctica/Vostok Asia/Almaty Asia/Amman Asia/Anadyr Asia/Aqtau Asia/Aqtobe Asia/Ashgabat
+    Asia/Atyrau Asia/Baghdad Asia/Baku Asia/Bangkok Asia/Barnaul Asia/Beirut Asia/Bishkek
+    Asia/Chita Asia/Colombo Asia/Damascus Asia/Dhaka Asia/Dili Asia/Dubai Asia/Dushanbe
+    Asia/Famagusta Asia/Gaza Asia/Hebron Asia/Ho_Chi_Minh Asia/Hong_Kong Asia/Hovd Asia/Irkutsk
+    Asia/Jakarta Asia/Jayapura Asia/Jerusalem Asia/Kabul Asia/Kamchatka Asia/Karachi
+    Asia/Kathmandu Asia/Khandyga Asia/Kolkata Asia/Krasnoyarsk Asia/Kuching Asia/Macau
+    Asia/Magadan Asia/Makassar Asia/Manila Asia/Nicosia Asia/Novokuznetsk Asia/Novosibirsk
+    Asia/Omsk Asia/Oral Asia/Pontianak Asia/Pyongyang Asia/Qatar Asia/Qostanay Asia/Qyzylorda
+    Asia/Riyadh Asia/Sakhalin Asia/Samarkand Asia/Seoul Asia/Shanghai Asia/Singapore
+    Asia/Srednekolymsk Asia/Taipei Asia/Tashkent Asia/Tbilisi Asia/Tehran Asia/Thimphu
+    Asia/Tokyo Asia/Tomsk Asia/Ulaanbaatar Asia/Urumqi Asia/Ust-Nera Asia/Vladivostok
+    Asia/Yakutsk Asia/Yangon Asia/Yekaterinburg Asia/Yerevan Atlantic/Azores Atlantic/Bermuda
+    Atlantic/Canary Atlantic/Cape_Verde Atlantic/Faroe Atlantic/Madeira Atlantic/South_Georgia
+    Atlantic/Stanley Australia/Adelaide Australia/Brisbane Australia/Broken_Hill
+    Australia/Darwin Australia/Eucla Australia/Hobart Australia/Lindeman Australia/Lord_Howe
+    Australia/Melbourne Australia/Perth Australia/Sydney Europe/Andorra Europe/Astrakhan
+    Europe/Athens Europe/Belgrade Europe/Berlin Europe/Brussels Europe/Bucharest Europe/Budapest
+    Europe/Chisinau Europe/Dublin Europe/Gibraltar Europe/Helsinki Europe/Istanbul
+    Europe/Kaliningrad Europe/Kirov Europe/Kyiv Europe/Lisbon Europe/London Europe/Madrid
+    Europe/Malta Europe/Minsk Europe/Moscow Europe/Paris Europe/Prague Europe/Riga Europe/Rome
+    Europe/Samara Europe/Saratov Europe/Simferopol Europe/Sofia Europe/Tallinn Europe/Tirane
+    Europe/Ulyanovsk Europe/Vienna Europe/Vilnius Europe/Volgograd Europe/Warsaw Europe/Zurich
+    Indian/Chagos Indian/Maldives Indian/Mauritius Pacific/Apia Pacific/Auckland
+    Pacific/Bougainville Pacific/Chatham Pacific/Easter Pacific/Efate Pacific/Fakaofo
+    Pacific/Fiji Pacific/Galapagos Pacific/Gambier Pacific/Guadalcanal Pacific/Guam
+    Pacific/Honolulu Pacific/Kanton Pacific/Kiritimati Pacific/Kosrae Pacific/Kwajalein
+    Pacific/Marquesas Pacific/Nauru Pacific/Niue Pacific/Norfolk Pacific/Noumea
+    Pacific/Pago_Pago Pacific/Palau Pacific/Pitcairn Pacific/Port_Moresby Pacific/Rarotonga
+    Pacific/Tahiti Pacific/Tarawa Pacific/Tongatapu
+)
+
+# True when the live system has a real timezone database (the LiveGUI does).
+tz_live_usable() {
+    [[ -r /usr/share/zoneinfo/zone1970.tab && -f /usr/share/zoneinfo/UTC ]]
+}
+
+# Print all known timezone names, one per line.
+tz_names() {
+    if tz_live_usable; then
+        { echo "UTC"; grep -v '^#' /usr/share/zoneinfo/zone1970.tab | awk -F'\t' 'NF >= 3 {print $3}'; } | sort -u
+    else
+        printf '%s\n' "${BUILTIN_TIMEZONES[@]}"
+    fi
+}
+
+# print_columns "lines": show a list in as many columns as fit the terminal.
+print_columns() {
+    awk -v width="$(term_width)" '
+        { item[NR] = $0; if (length($0) > max) max = length($0) }
+        END {
+            colw = max + 2
+            cols = int((width - 4) / colw); if (cols < 1) cols = 1
+            rows = int((NR + cols - 1) / cols)
+            for (r = 1; r <= rows; r++) {
+                line = "    "
+                for (c = 0; c < cols; c++) {
+                    i = r + c * rows
+                    if (i <= NR) line = line sprintf("%-" colw "s", item[i])
+                }
+                sub(/ +$/, "", line)
+                print line
+            }
+        }' <<<"$1"
+}
+
 browse_timezones() {
-    local region
-    if [[ ! -d /usr/share/zoneinfo ]]; then
-        warn "This live system has no timezone database to browse. Type a name such as Europe/Berlin or America/Chicago."
+    local names region cities
+    names=$(tz_names)
+    echo
+    echo "  Regions:"
+    print_columns "$(awk -F/ 'NF > 1 {print $1}' <<<"$names" | sort -u; echo "UTC")"
+    read_line region "  Region to list (Enter to go back): "
+    region=$(trim "$region")
+    if [[ -z $region ]]; then return 0; fi
+    if [[ $region == "UTC" ]]; then
+        echo "  Type UTC to use it."
+        return 0
+    fi
+    cities=$(awk -v r="${region}/" 'index($0, r) == 1 {print substr($0, length(r) + 1)}' <<<"$names")
+    if [[ -z $cities ]]; then
+        warn "There is no region called '${region}'. Region names are case sensitive, for example Europe."
         return 0
     fi
     echo
-    echo "  Regions:"
-    find /usr/share/zoneinfo -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
-        | grep -E '^(Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific)$' \
-        | sort | sed 's/^/    /'
-    read_line region "  Region to list (Enter to go back): "
-    region=$(trim "$region")
-    if [[ -n $region && -d /usr/share/zoneinfo/$region ]]; then
-        echo
-        (cd "/usr/share/zoneinfo/$region" && find . -type f | sed 's|^\./||' | sort | column -c "$(term_width)" 2>/dev/null) \
-            || (cd "/usr/share/zoneinfo/$region" && find . -type f | sed 's|^\./||' | sort)
-        echo
-        echo "  Now type the full name, for example ${region}/$(find "/usr/share/zoneinfo/$region" -maxdepth 1 -type f -printf '%f\n' | sort | head -n1)"
-    fi
+    print_columns "$cities"
+    echo
+    echo "  Now type the full name, for example ${region}/$(head -n1 <<<"$cities")"
 }
 
 valid_timezone() {
@@ -516,13 +613,19 @@ valid_timezone() {
         warn "That does not look like a timezone name. Example: America/New_York. Type 'list' to browse."
         return 1
     fi
-    if [[ -d /usr/share/zoneinfo ]]; then
+    if tz_live_usable; then
         if [[ -f /usr/share/zoneinfo/$tz ]]; then return 0; fi
-        warn "Timezone '${tz}' was not found. Type 'list' to browse."
+        warn "Timezone '${tz}' was not found. Names are case sensitive. Type 'list' to browse."
         return 1
     fi
-    warn "Cannot verify '${tz}' on this live system. It will be checked during installation (UTC is used if it is invalid)."
-    return 0
+    if grep -qxF -- "$tz" <<<"$(tz_names)"; then
+        return 0
+    fi
+    warn "'${tz}' is not in the installer's list of timezones (names are case sensitive; type 'list' to browse). Older alias names such as US/Eastern are not in the list but still exist."
+    if yesno "Use '${tz}' anyway? It is checked again during installation, and UTC is used if it does not exist." n; then
+        return 0
+    fi
+    return 1
 }
 
 # ----------------------------------------------------------------------------
@@ -1792,7 +1895,9 @@ verify_stage3() {
 
     if [[ -s ${f}.sha256 ]]; then
         local expected actual
-        expected=$(grep -Eo '^[0-9a-f]{64}' "${f}.sha256" | head -n1 || true)
+        # "<64 hex digits>  <file name>" lines, possibly inside a PGP clearsigned block.
+        expected=$(tr -d '\r' <"${f}.sha256" | awk -v f="$f" '
+            length($1) == 64 && $1 ~ /^[0-9a-fA-F]+$/ && ($2 == f || $2 == "*" f) { print tolower($1); exit }')
         if [[ -n $expected ]]; then
             actual=$(sha256sum "$f" | awk '{print $1}')
             if [[ $expected != "$actual" ]]; then
@@ -1813,24 +1918,39 @@ verify_stage3() {
     fi
 }
 
+# Find the newest stage3 for STAGE3_VARIANT (sets STAGE3_URL and STAGE3_FILE).
+# Runs before the disk is touched, so a download problem stops the installer
+# while nothing has been changed yet.
+#
+# The index file is PGP clearsigned and contains a line like:
+#   20260913T163055Z/stage3-amd64-desktop-systemd-20260913T163055Z.tar.xz 753542880
+resolve_stage3() {
+    local base index listing rel
+    base="${DIST_BASE%/}/releases/amd64/autobuilds"
+    index="${base}/latest-stage3-amd64-${STAGE3_VARIANT}.txt"
+    info "Looking up the newest stage3-amd64-${STAGE3_VARIANT}."
+    listing=$(fetch_text "$index") \
+        || die "Could not download ${index}. Check the network connection and try again. Nothing on disk has been changed."
+    rel=$(printf '%s\n' "$listing" | tr -d '\r' | awk -v v="stage3-amd64-${STAGE3_VARIANT}-" '
+        $1 !~ /^#/ && $1 ~ /\.tar\.xz$/ && index($1, v) { print $1; exit }')
+    if [[ -z $rel ]]; then
+        log "Stage3 index content: ${listing}"
+        die "Could not find a stage3-amd64-${STAGE3_VARIANT} file name in ${index} (its content is in the log). Nothing on disk has been changed."
+    fi
+    if [[ $rel == */* ]]; then
+        STAGE3_URL="${base}/${rel}"
+    else
+        STAGE3_URL="${base}/current-stage3-amd64-${STAGE3_VARIANT}/${rel}"
+    fi
+    STAGE3_FILE=${rel##*/}
+    ok "Newest stage3: ${STAGE3_FILE}"
+}
+
 install_stage3() {
     section "Downloading and verifying the Gentoo stage3"
     say "A stage3 is a small but complete Gentoo base system (compiler, Portage, core tools) that everything else is built on. The installer downloads the newest stage3-amd64-${STAGE3_VARIANT}, checks its PGP signature from Gentoo Release Engineering and its SHA256 checksum, then unpacks it onto your new root filesystem."
-    local base listing rel url file
-    base="${DIST_BASE%/}/releases/amd64/autobuilds"
-    listing=$(fetch_text "${base}/latest-stage3-amd64-${STAGE3_VARIANT}.txt") \
-        || die "Could not download the stage3 index from ${base}."
-    rel=$(grep -Eo '^([0-9]{8}T[0-9]{6}Z/)?stage3-amd64-[a-z0-9-]+\.tar\.xz' <<<"$listing" | head -n1 || true)
-    if [[ -z $rel ]]; then
-        die "Could not find a stage3 file name in ${base}/latest-stage3-amd64-${STAGE3_VARIANT}.txt. The index format may have changed."
-    fi
-    if [[ $rel == */* ]]; then
-        url="${base}/${rel}"
-    else
-        url="${base}/current-stage3-amd64-${STAGE3_VARIANT}/${rel}"
-    fi
-    file=${rel##*/}
-    info "Newest stage3: ${file}"
+    if [[ -z $STAGE3_URL ]]; then resolve_stage3; fi
+    local url=$STAGE3_URL file=$STAGE3_FILE
     cd "$MNT"
     fetch "$url" "$file"
     fetch "${url}.asc" "${file}.asc" || warn "Could not download the PGP signature file."
@@ -2269,6 +2389,7 @@ fresh_install() {
         print_summary
         if confirm_install; then break; fi
     done
+    resolve_stage3
     prepare_disk
     install_stage3
     mount_pseudo
