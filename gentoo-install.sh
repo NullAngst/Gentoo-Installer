@@ -15,7 +15,6 @@
 #  Every question is asked first, with an explanation of each option. After
 #  you confirm, the installation runs unattended. If a step fails, fix the
 #  cause and run the script again with --resume; finished steps are skipped.
-#
 # =============================================================================
 
 set -Eeuo pipefail
@@ -440,8 +439,8 @@ valid_keymap() {
         warn "That does not look like a keymap name."
         return 1
     fi
-    if find /usr/share/keymaps -name 'us.map*' -print -quit 2>/dev/null | grep -q .; then
-        if find /usr/share/keymaps -name "${k}.map*" -print -quit 2>/dev/null | grep -q .; then
+    if [[ -n $(find /usr/share/keymaps -name 'us.map*' -print -quit 2>/dev/null || true) ]]; then
+        if [[ -n $(find /usr/share/keymaps -name "${k}.map*" -print -quit 2>/dev/null || true) ]]; then
             return 0
         fi
         warn "Keymap '${k}' was not found. Examples: us, uk, de, de-latin1, fr, es, it, br-abnt2, pl, ru, dvorak."
@@ -1073,7 +1072,8 @@ q_disk() {
     say_pre "$(printf '  Current contents of %s:\n' "$DISK"; lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null | sed 's/^/    /')"
 
     local bytes gib
-    bytes=$(lsblk -bdno SIZE "$DISK" | head -n1)
+    bytes=$(lsblk -bdno SIZE "$DISK" 2>/dev/null || true)
+    bytes=${bytes%%$'\n'*}
     gib=$(( bytes / 1073741824 ))
     if (( gib < MIN_DISK_GIB )); then
         die "${DISK} has only ${gib} GiB. At least ${MIN_DISK_GIB} GiB is required (40 GiB or more for a desktop)."
@@ -1221,7 +1221,8 @@ q_manual_partitions() {
             warn "${ESP_PART} has no FAT filesystem, so it will be formatted as FAT32."
             FORMAT_ESP="yes"
         fi
-        bytes=$(lsblk -bdno SIZE "$ESP_PART" | head -n1)
+        bytes=$(lsblk -bdno SIZE "$ESP_PART" 2>/dev/null || true)
+        bytes=${bytes%%$'\n'*}
         if (( bytes < 300 * 1048576 )); then
             warn "${ESP_PART} is smaller than 300 MiB. That is too small for kernels and may even be tight for GRUB."
         elif [[ $BOOTLOADER == "systemd-boot" ]] && (( bytes < 900 * 1048576 )); then
@@ -1239,7 +1240,8 @@ q_manual_partitions() {
         used+=" $SWAP_PART"
     fi
 
-    bytes=$(lsblk -bdno SIZE "$ROOT_PART" | head -n1)
+    bytes=$(lsblk -bdno SIZE "$ROOT_PART" 2>/dev/null || true)
+    bytes=${bytes%%$'\n'*}
     if (( bytes / 1073741824 < MIN_DISK_GIB )); then
         die "${ROOT_PART} is smaller than ${MIN_DISK_GIB} GiB. Make it larger and run the installer again."
     fi
@@ -1249,7 +1251,9 @@ q_manual_partitions() {
     if [[ $BOOT_MODE == "bios" ]]; then
         GRUB_DISK=$DISK
         if [[ $(lsblk_field PTTYPE "$GRUB_DISK") == "gpt" ]]; then
-            if ! lsblk -lno PARTTYPE "$GRUB_DISK" 2>/dev/null | grep -qi "${GUID_BIOS}"; then
+            local ptypes
+            ptypes=$(lsblk -lno PARTTYPE "$GRUB_DISK" 2>/dev/null || true)
+            if ! grep -qi "${GUID_BIOS}" <<<"$ptypes"; then
                 die "${GRUB_DISK} uses GPT but has no 'BIOS boot' partition. GRUB needs one (1 MiB, type 'BIOS boot') to boot in BIOS mode. Create it with cfdisk and run the installer again."
             fi
         fi
@@ -1897,7 +1901,7 @@ verify_stage3() {
         local expected actual
         # "<64 hex digits>  <file name>" lines, possibly inside a PGP clearsigned block.
         expected=$(tr -d '\r' <"${f}.sha256" | awk -v f="$f" '
-            length($1) == 64 && $1 ~ /^[0-9a-fA-F]+$/ && ($2 == f || $2 == "*" f) { print tolower($1); exit }')
+            !found && length($1) == 64 && $1 ~ /^[0-9a-fA-F]+$/ && ($2 == f || $2 == "*" f) { print tolower($1); found = 1 }')
         if [[ -n $expected ]]; then
             actual=$(sha256sum "$f" | awk '{print $1}')
             if [[ $expected != "$actual" ]]; then
@@ -1932,7 +1936,7 @@ resolve_stage3() {
     listing=$(fetch_text "$index") \
         || die "Could not download ${index}. Check the network connection and try again. Nothing on disk has been changed."
     rel=$(printf '%s\n' "$listing" | tr -d '\r' | awk -v v="stage3-amd64-${STAGE3_VARIANT}-" '
-        $1 !~ /^#/ && $1 ~ /\.tar\.xz$/ && index($1, v) { print $1; exit }')
+        !found && $1 !~ /^#/ && $1 ~ /\.tar\.xz$/ && index($1, v) { print $1; found = 1 }')
     if [[ -z $rel ]]; then
         log "Stage3 index content: ${listing}"
         die "Could not find a stage3-amd64-${STAGE3_VARIANT} file name in ${index} (its content is in the log). Nothing on disk has been changed."
@@ -2447,7 +2451,9 @@ enable_service() {
     for s in "$@"; do
         if [[ $INIT == "openrc" ]]; then
             if [[ -e /etc/init.d/$s ]]; then
-                if rc-update show "$runlevel" 2>/dev/null | grep -Eq "^[[:space:]]*${s}[[:space:]]*\|"; then
+                local shown
+                shown=$(rc-update show "$runlevel" 2>/dev/null || true)
+                if grep -Eq "^[[:space:]]*${s}[[:space:]]*\|" <<<"$shown"; then
                     ok "${s} is already enabled (runlevel ${runlevel})."
                 else
                     run rc-update add "$s" "$runlevel"
@@ -2506,8 +2512,17 @@ c_profile() {
     [[ -n $ver ]] || die "Could not determine the current profile version. Check 'eselect profile list'."
     target="default/linux/amd64/${ver}${PROFILE_SUFFIX}"
     info "Selecting profile: ${target}"
-    if ! eselect profile list | grep -Eq "[[:space:]]${target//./\\.}([[:space:]]|\$)"; then
-        die "Profile ${target} does not exist in this repository snapshot. Run 'eselect profile list' in the chroot to see the available ones."
+    # Capture the list first: piping eselect straight into 'grep -q' can make
+    # eselect die of SIGPIPE, which pipefail reports as "not found".
+    local list
+    list=$(eselect profile list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true)
+    if ! grep -Eq "[[:space:]]${target//./\\.}([[:space:]]|\$)" <<<"$list"; then
+        if [[ -d /var/db/repos/gentoo/profiles/${target} ]]; then
+            warn "eselect did not list ${target}, but it exists in the repository. Trying it anyway."
+        else
+            log "eselect profile list output:"$'\n'"${list}"
+            die "Profile ${target} does not exist in this repository snapshot. Run 'eselect profile list' in the chroot to see the available ones."
+        fi
     fi
     run eselect profile set "$target"
     run eselect profile show
