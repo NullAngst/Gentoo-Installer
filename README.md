@@ -60,14 +60,14 @@ Boot the live image, then as root.
 Menu version:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/main/gentoo-install-tui.sh
+curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install-tui.sh
 bash gentoo-install-tui.sh
 ```
 
 Console version:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/main/gentoo-install.sh
+curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh
 bash gentoo-install.sh
 ```
 
