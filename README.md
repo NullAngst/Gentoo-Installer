@@ -2,6 +2,13 @@
 
 A guided, verbose installer for Gentoo Linux on amd64 (x86_64). You boot the official Gentoo live image, download one script, and answer its questions. It explains every option as it asks, then installs a complete system unattended, following the official [Gentoo AMD64 Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64).
 
+It comes in two versions that ask the same questions and run the same installation:
+
+| Script | Interface |
+|---|---|
+| `gentoo-install-tui.sh` | Menu version: dialog boxes and a main menu where you can open, change or skip any section in any order. |
+| `gentoo-install.sh` | Console version: plain text questions, one after another. Useful when a terminal cannot show dialog boxes (serial console, very small screen). |
+
 It is meant for people who want a Gentoo system without typing the Handbook in by hand, and who still want to see what is happening and why. Every command it runs is printed and logged, and every configuration file it writes is commented.
 
 ---
@@ -9,6 +16,7 @@ It is meant for people who want a Gentoo system without typing the Handbook in b
 ## Contents
 
 - [What it does](#what-it-does)
+- [The menu version](#the-menu-version)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [What you are asked](#what-you-are-asked)
@@ -21,6 +29,7 @@ It is meant for people who want a Gentoo system without typing the Handbook in b
 - [Limitations](#limitations)
 - [Testing in a virtual machine](#testing-in-a-virtual-machine)
 - [Files the installer creates](#files-the-installer-creates)
+- [Repository layout and building](#repository-layout-and-building)
 
 ---
 
@@ -46,16 +55,25 @@ It is meant for people who want a Gentoo system without typing the Handbook in b
 
 ## Quick start
 
-Boot the live image, then as root:
+Boot the live image, then as root.
+
+Menu version:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/main/gentoo-install-tui.sh
+bash gentoo-install-tui.sh
+```
+
+Console version:
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/main/gentoo-install.sh
 bash gentoo-install.sh
 ```
 
-On the LiveGUI image, open a terminal and use `sudo bash gentoo-install.sh`.
+On the LiveGUI image, open a terminal and prefix the second command with `sudo`.
 
-Download first, then run. Piping it straight into bash (`curl ... | bash`) does not work, because the script reads your answers from the keyboard; it detects this and prints the two commands above.
+Download first, then run. Piping a script straight into bash (`curl ... | bash`) does not work, because it reads your answers from the keyboard; both scripts detect this and print the right commands. Each script is self-contained, so you only need the one you run.
 
 Options:
 
@@ -64,6 +82,37 @@ Options:
 | *(none)* | Start a new installation |
 | `--resume` | Continue after fixing whatever made a step fail |
 | `--help` | Show usage |
+
+## The menu version
+
+`gentoo-install-tui.sh` uses `dialog`, which is on the official Gentoo live images (it comes with `mirrorselect`). If `dialog` is missing it falls back to `whiptail`, and if neither exists it tells you to use the console version.
+
+After the welcome screen, the keyboard, network and hardware checks, you land on the main menu:
+
+```
+Guided setup: go through every section in order
+1. System            [default]   KDE Plasma, systemd, binary packages: yes
+2. Disk              [required]  not set yet
+3. Region            [default]   gentoo, UTC, en_US.UTF-8
+4. Accounts          [required]  not set yet
+5. Drivers & network [default]   network: networkmanager, graphics: nvidia, SSH: no
+6. Software          [default]   Flatpak: yes (0 apps), 0 native packages
+Review all settings
+Install Gentoo
+Quit without installing
+```
+
+- **[default]** sections are already filled in with the recommended settings for your hardware, exactly what you would get by pressing Enter through their questions. They keep following your other choices until you open them: for example, choosing *No desktop* in *System* turns the Flatpak default off and the SSH server default on. Once you open a section it shows **[done]** and keeps your answers.
+- **[required]** sections (Disk and Accounts) must be done before *Install* is allowed. *Install* also checks the whole configuration for conflicts, such as systemd-networkd selected together with OpenRC, and names the section to fix.
+- Reopening a section starts from your previous answers.
+- **Esc or Cancel** inside a section offers: continue, go back to the main menu and discard the changes made in that section, or quit. Nothing on disk has been changed at that point.
+- The timezone is picked from a region menu and a city menu instead of typed.
+- *Review all settings* shows the full summary in a scrollable box.
+- *Install Gentoo* shows the summary, asks for a yes, then asks you to type `ERASE` (or `FORMAT` for manual partitioning).
+
+Once the installation starts, the menu version switches to plain scrolling text, the same output as the console version. Emerge output is the useful progress indicator for a multi-hour build, and a progress bar could not estimate it honestly. The final questions (unmount, reboot) are dialog boxes again.
+
+Keys: arrow keys and Tab move, Space ticks a checkbox, Enter confirms, Esc goes back. With the `whiptail` fallback, long scrollable text boxes need Tab to reach the OK button before Enter.
 
 ## What you are asked
 
@@ -75,6 +124,8 @@ Options:
 | 4. Accounts | Root password, username, user password, sudo or doas |
 | 5. Hardware and network | NVIDIA proprietary or Nouveau (only when an NVIDIA card is present), network manager, Bluetooth, printing, SSH server |
 | 6. Software | Download mirror, Flatpak with a choice of Flathub apps, optional native packages |
+
+Both versions ask exactly these questions; the menu version groups them into the six main menu sections.
 
 Before those, it offers to switch the live keyboard layout, so that passwords are typed on the layout you actually use.
 
@@ -186,10 +237,13 @@ These are the choices the installer makes on your behalf, with what they cost.
 
 **Conservative licenses.** `ACCEPT_LICENSE="-* @FREE @BINARY-REDISTRIBUTABLE"`, with explicit exceptions only for firmware, Intel microcode, the NVIDIA driver and Google Chrome when you pick them. Other proprietary packages you install later need their own `package.license` entry; emerge tells you which.
 
+**One engine, two front ends.** The menu version does not reimplement the questions. It replaces the handful of prompt functions (choose, ask, yes/no, password, checklist) with dialog versions, and everything else, including the chroot stage, is shared code. The cost is a build step for contributors (see [Repository layout and building](#repository-layout-and-building)); the benefit is that a fix to a question or to the installation reaches both scripts at once. To let *Back to the main menu* discard a section, each section runs in a subshell and hands its answers back through a private (mode 600) temporary file in the live system's RAM-backed `/tmp`, which is deleted immediately. For the Accounts and Disk sections that file briefly contains the passwords you typed.
+
 **Signature check fallback.** If the stage3's PGP signature cannot be checked because gpg or Gentoo's key is unavailable on the live system, the installer says so and asks whether to continue with only the SHA256 checksum and HTTPS transport. The default answer is yes, so that an unusual live environment does not dead-end the install. A signature that is present and **bad** always aborts. The Handbook's own verification steps use gpg and the key from the official live image, so this fallback should not normally come up there.
 
 ## Limitations
 
+- **Untested on real hardware** at this version (see [Status](#gentoo-installer)).
 - **Secure Boot is not supported.** Nothing is signed. Disable Secure Boot in the firmware, or set up signing yourself afterwards (Gentoo wiki: *Secure Boot*).
 - **amd64 only.** 32-bit UEFI firmware is refused; boot the live image in BIOS/CSM mode on such machines.
 - **No LVM, RAID, ZFS or multi-disk root,** and no separate `/home` partition (Btrfs gets an `@home` subvolume).
@@ -201,6 +255,7 @@ These are the choices the installer makes on your behalf, with what they cost.
 - **dhcpcd and systemd-networkd options configure wired networking only.** Pick NetworkManager for Wi-Fi.
 - **Package names in the optional lists can go stale** as Gentoo moves packages around. A missing one is skipped and reported, not fatal.
 - **Not portable between machines** without changes, because of `-march=native` and the host-only initramfs.
+- **The menu version shows plain text during the installation itself,** not dialog boxes (see [The menu version](#the-menu-version)).
 - **Mirrors.** A mirror chosen with `mirrorselect` is used for the stage3 and source downloads; binary packages always come from Gentoo's own CDN (`distfiles.gentoo.org`).
 
 ## Testing in a virtual machine
@@ -242,5 +297,31 @@ On the new system (paths relative to its root):
 | `/usr/local/sbin/zram-swap` and its OpenRC `local.d` hooks or systemd unit | zram swap |
 | `/etc/cron.weekly/fstrim` | SSD TRIM on OpenRC |
 | `/usr/local/sbin/install-my-flatpaks` | Re-runs the Flathub setup and your app selection |
-| `/root/gentoo-install.sh`, `/root/gentoo-install.conf`, `/root/.gentoo-install-progress` | Copy of the installer, saved answers (password hashes removed after use) and step progress, kept for `--resume` and for reference. Safe to delete once the system boots. |
+| `/root/gentoo-install.sh`, `/root/gentoo-install.conf`, `/root/.gentoo-install-progress` | Copy of the installer that was used (either version is saved under this name), saved answers (password hashes removed after use) and step progress, kept for `--resume` and for reference. Safe to delete once the system boots. |
 | `~/GENTOO-POST-INSTALL-NOTES.txt` | Next steps, tailored to your choices |
+
+## Repository layout and building
+
+The two installers are single files so each can be downloaded with one `curl` command, but they are generated from shared sources:
+
+```
+src/10-core.sh        constants, output and prompt helpers, validators
+src/20-detect.sh      live system checks, network, clock, hardware detection
+src/30-questions.sh   every question, the summary, derived settings
+src/40-install.sh     partitioning, stage3, configuration files, resume
+src/50-chroot.sh      the 19 steps that run inside the new system
+src/60-tui.sh         dialog/whiptail front end and the main menu (menu version only)
+src/90-main-cli.sh    entry point of gentoo-install.sh
+src/91-main-tui.sh    entry point of gentoo-install-tui.sh
+build.sh              concatenates src/ into the two installers
+```
+
+To change anything, edit `src/`, then:
+
+```sh
+./build.sh           # rebuild gentoo-install.sh and gentoo-install-tui.sh
+./build.sh --lint    # run ShellCheck on both
+./build.sh --check   # fail if the committed installers do not match src/
+```
+
+Commit the rebuilt installers together with the `src/` change. `--check` is meant for a CI job, so a pull request cannot change `src/` without rebuilding. The one ShellCheck exception is documented in `build.sh`: the menu version replaces the console prompt functions with wrappers, and ShellCheck cannot see that the originals are still called through copies made at load time.
