@@ -9,7 +9,11 @@ It comes in two versions that ask the same questions and run the same installati
 | `gentoo-install-tui.sh` | Menu version: dialog boxes and a main menu where you can open, change or skip any section in any order. |
 | `gentoo-install.sh` | Console version: plain text questions, one after another. Useful when a terminal cannot show dialog boxes (serial console, very small screen). |
 
+Installed systems also get **`gentoo-helper`**, simple menus for everyday package management after installation: updating, installing and removing software, cleanup. See [gentoo-helper](#gentoo-helper-everyday-package-management).
+
 It is meant for people who want a Gentoo system without typing the Handbook in by hand, and who still want to see what is happening and why. Every command it runs is printed and logged, and every configuration file it writes is commented.
+
+> **Status:** version 1.0.0. Both scripts pass `bash -n` and ShellCheck (with one documented exclusion for the menu version, see [Repository layout and building](#repository-layout-and-building)). The questionnaire, configuration writers, resume logic and generated partition tables have been tested in a sandbox with stubbed hardware, and the partition tables were validated with util-linux `sfdisk`. The menu version was driven end to end through a scripted stand-in for `dialog` and `whiptail`, and its widgets were checked against the real `dialog` 1.3 and `whiptail` 0.52 programs, including an 80x24 terminal. Neither script has **yet** been run against real hardware or a real virtual machine from start to finish. Test it in a VM first (see [Testing in a virtual machine](#testing-in-a-virtual-machine)) and please open an issue with the log if something fails.
 
 ---
 
@@ -28,8 +32,10 @@ It is meant for people who want a Gentoo system without typing the Handbook in b
 - [Design decisions and trade-offs](#design-decisions-and-trade-offs)
 - [Limitations](#limitations)
 - [Testing in a virtual machine](#testing-in-a-virtual-machine)
+- [gentoo-helper: everyday package management](#gentoo-helper-everyday-package-management)
 - [Files the installer creates](#files-the-installer-creates)
 - [Repository layout and building](#repository-layout-and-building)
+- [License](#license)
 
 ---
 
@@ -39,18 +45,19 @@ It is meant for people who want a Gentoo system without typing the Handbook in b
 2. Detects the hardware: CPU model, thread count, RAM, x86-64-v3 support, UEFI or BIOS, Secure Boot, virtual machine, laptop, Wi-Fi, Bluetooth and graphics cards.
 3. Asks all of its questions in six parts, each with an explanation and a recommended default. Pressing Enter accepts the default.
 4. Shows a summary. You can start over, quit, or confirm by typing `ERASE` (whole disk) or `FORMAT` (manual partitions). **The installer changes nothing on disk before this point.** The one exception is your own doing: in manual mode you can edit partitions in `cfdisk` while answering.
-5. Partitions and formats, optionally with LUKS2 encryption.
-6. Downloads the newest stage3, checks its PGP signature from Gentoo Release Engineering and its SHA256 checksum, and unpacks it.
-7. Writes a hardware-tuned `make.conf`, the binary package host configuration, `fstab`, the kernel command line and the dracut configuration.
-8. Enters the new system (chroot) and runs 19 numbered steps: repository sync, profile, binary package keys, CPU flags, locale and timezone, `@world` update, system tools, firmware and microcode, basic configuration, bootloader, kernel, networking, user accounts, desktop, drivers, applications, services, final bootloader check, and final touches.
-9. Unmounts and offers to reboot.
+5. Looks up the newest stage3 for your choices. This happens before the disk is touched, so a download problem stops the installer while nothing has been changed.
+6. Partitions and formats, optionally with LUKS2 encryption.
+7. Downloads the stage3, checks its PGP signature from Gentoo Release Engineering and its SHA256 checksum, and unpacks it.
+8. Writes a hardware-tuned `make.conf`, the binary package host configuration, `fstab`, the kernel command line and the dracut configuration.
+9. Enters the new system (chroot) and runs 19 numbered steps: repository sync, profile, binary package keys, CPU flags, locale and timezone, `@world` update, system tools, firmware and microcode, basic configuration, bootloader, kernel, networking, user accounts, desktop, drivers, applications, services, final bootloader check, and final touches.
+10. Unmounts and offers to reboot.
 
 ## Requirements
 
 - An amd64 (x86_64) computer. UEFI is recommended; legacy BIOS works with GRUB.
 - The official Gentoo live image: the [minimal installation CD or the LiveGUI](https://www.gentoo.org/downloads/). Other live systems may work but are untested; the script checks for the tools it needs and stops if one is missing.
 - An internet connection.
-- At least 20 GiB of disk. 40 GiB or more is strongly recommended for a desktop.
+- Disk space: at least 40 GiB for a desktop installation (60 GiB or more is comfortable), 20 GiB without a desktop. The installer refuses smaller disks, because a desktop's packages, Portage's downloads and temporary build files need the room, and running out of space mid-build fails in confusing ways.
 - Secure Boot turned off in the firmware before you boot the installed system (see [Limitations](#limitations)).
 
 ## Quick start
@@ -67,7 +74,7 @@ bash gentoo-install-tui.sh
 Console version:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh
+curl -fsSLO hhttps://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh
 bash gentoo-install.sh
 ```
 
@@ -190,7 +197,11 @@ The profile follows the choice: `desktop/plasma`, `desktop/gnome`, `desktop` or 
 - Live side log: `/tmp/gentoo-install.log`
 - Inside the new system: `/var/log/gentoo-install.log`, plus a copy of the live log at `/var/log/gentoo-install-live.log` after a successful install.
 
-Every step inside the new system is recorded as it finishes. When a step fails, the installer prints the failing command, the step number and where the log is, then stops. To continue:
+Every step inside the new system is recorded as it finishes. When a step fails, the installer prints the failing command, the step number and where the log is, then stops. When the failure is a package build, it also prints a *Why it failed* block: the path of that package's own build log, its first error lines, its last lines, and the free disk space. If the build log simply stops mid-line without any error, it says so; that almost always means the disk filled up or the filesystem became read-only.
+
+Before each step the installer also checks free disk space against a rough minimum for that step. If space is short, it first deletes Portage's download caches and leftover build directories, and stops with a clear message if that is not enough, rather than failing halfway through a build.
+
+To continue after a failure:
 
 1. Read the end of the log.
 2. Fix the cause. If it is inside the new system, `chroot /mnt/gentoo /bin/bash`, then `source /etc/profile`, fix it, and `exit`.
@@ -235,6 +246,12 @@ These are the choices the installer makes on your behalf, with what they cost.
 
 **GRUB by default.** It handles every combination the installer offers and dual boot detection. systemd-boot is offered on UEFI and is simpler, but keeps kernels on the EFI partition, so that partition needs room (the automatic layout uses 1 GiB).
 
+**Quiet builds.** The installer runs every build with Portage's `--quiet-build`: compiler output goes to each package's build log instead of the screen, and you see one line per package. Streaming thousands of long compiler command lines to a slow virtual-machine console was observed to make builds die mid-way without an error message, and the full output is of little use on screen anyway. When a build fails, the relevant part of its log is shown automatically. Your own `emerge` runs after installation are not affected.
+
+**Perl modules are rebuilt after the base update.** The base system update can bring a new Perl version, after which Perl modules built for the old one stop loading. That breaks later builds in confusing ways (GRUB fails while generating its manual pages, because `help2man` cannot load `Locale::gettext`). The installer runs `perl-cleaner --all` right after the update, which does nothing when no module needs rebuilding.
+
+**Download caches are deleted as it goes.** Portage keeps every downloaded binary package and source archive by default. The installer deletes the binary packages after the base system update and after the desktop, and all download caches at the end. They are only caches: the cost is that reinstalling a package later downloads it again.
+
 **Conservative licenses.** `ACCEPT_LICENSE="-* @FREE @BINARY-REDISTRIBUTABLE"`, with explicit exceptions only for firmware, Intel microcode, the NVIDIA driver and Google Chrome when you pick them. Other proprietary packages you install later need their own `package.license` entry; emerge tells you which.
 
 **One engine, two front ends.** The menu version does not reimplement the questions. It replaces the handful of prompt functions (choose, ask, yes/no, password, checklist) with dialog versions, and everything else, including the chroot stage, is shared code. The cost is a build step for contributors (see [Repository layout and building](#repository-layout-and-building)); the benefit is that a fix to a question or to the installation reaches both scripts at once. To let *Back to the main menu* discard a section, each section runs in a subshell and hands its answers back through a private (mode 600) temporary file in the live system's RAM-backed `/tmp`, which is deleted immediately. For the Accounts and Disk sections that file briefly contains the passwords you typed.
@@ -253,6 +270,7 @@ These are the choices the installer makes on your behalf, with what they cost.
 - **Older NVIDIA cards.** Newer NVIDIA driver branches are dropping older GPUs (the GTX 10 series and earlier are affected). On such a card you may need to mask newer `nvidia-drivers` or use Nouveau.
 - **GNOME on OpenRC** works through elogind, but GNOME is developed against systemd, and some settings panels may be limited. The installer recommends systemd when you pick GNOME.
 - **dhcpcd and systemd-networkd options configure wired networking only.** Pick NetworkManager for Wi-Fi.
+- **Built-in timezone list.** The minimal ISO ships an empty `/usr/share/zoneinfo`, so the installer carries its own list of timezone names (tzdata 2026a) for browsing and checking. A zone added to tzdata later is not in it; you can still type it and confirm, and the new system's own timezone database checks it during installation (falling back to UTC with a warning if it does not exist). On the LiveGUI, which has a full database, that is used instead.
 - **Package names in the optional lists can go stale** as Gentoo moves packages around. A missing one is skipped and reported, not fatal.
 - **Not portable between machines** without changes, because of `-march=native` and the host-only initramfs.
 - **The menu version shows plain text during the installation itself,** not dialog boxes (see [The menu version](#the-menu-version)).
@@ -281,6 +299,44 @@ virt-manager is easier: before starting the install, open *Customize configurati
 
 In a VM the installer detects the hypervisor, skips firmware and microcode, and installs the matching guest tools. With `-cpu host`, `-march=native` targets your host CPU, so a disk image built this way may not boot on a VM with a different CPU model.
 
+## gentoo-helper: everyday package management
+
+Gentoo's package manager, `emerge`, is powerful but not beginner friendly. `gentoo-helper` puts the everyday tasks behind simple menus. Every action first shows what will happen in plain words, and asks before changing anything.
+
+```
+gentoo-helper                  menus
+gentoo-helper update           update the whole system
+gentoo-helper install NAME     find and install a package
+gentoo-helper remove NAME      remove a package
+gentoo-helper clean            remove unneeded packages, free disk space
+gentoo-helper news             read Gentoo news
+gentoo-helper configs          review configuration file updates
+gentoo-helper flatpak          Flatpak apps
+```
+
+The installer puts it in `/usr/local/bin/gentoo-helper`. On a system installed before it existed, or installed another way:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-helper.sh
+sudo install -m 755 gentoo-helper.sh /usr/local/bin/gentoo-helper
+```
+
+It asks for your password through `sudo` or `doas` when needed. It uses `dialog` menus, offers to install `dialog` if it is missing, and falls back to plain text menus otherwise.
+
+What it does:
+
+- **Update the whole system.** Downloads the latest package list, offers to show unread Gentoo news, and shows how many updates are ready-made and how many will be compiled. After asking, it installs them. Afterwards it rebuilds Perl modules if Perl was upgraded, rebuilds programs still using replaced libraries, offers to remove packages nothing needs anymore, walks you through configuration file updates, updates Flatpak apps, and tells you when a restart is needed for a new kernel.
+- **Find and install.** Search by name (or description), see whether each result is installed, then install it the recommended way (ready-made when available, compiled otherwise), ready-made only, or compiled on your machine.
+- **Settings Portage asks for.** When a package needs a USE flag, a licence or a testing version allowed first, the helper explains the change and offers to save it. These are saved only in files named `zz-gentoo-helper` under `/etc/portage/`, which you can review, edit or remove from the Maintenance menu. Testing (`~amd64`) versions default to *no*. Masked packages are never unmasked.
+- **Remove.** Lists the packages you chose to install, removes one only if nothing else needs it, and warns loudly before removing anything that looks essential (kernel, bootloader, drivers, network, login screen, desktop).
+- **Maintenance.** Remove unneeded packages, free disk space (old downloads and failed-build leftovers), remove old kernels (keeping the 3 newest), review configuration updates, read news, rebuild after library or Perl upgrades, and view or undo the settings it saved.
+- **Flatpak.** Search Flathub, install, remove and update apps, and remove unused runtimes.
+- **When something fails,** it saves a plain report of the actual error from the package's build log in `/var/log/gentoo-helper-last-failure.txt`. Everything it runs is logged to `/var/log/gentoo-helper.log`.
+
+Configuration updates, in more detail: Portage only holds back a new configuration file when the current one was changed (by you or by the installer). The helper shows the differences and lets you keep yours, take the new one (your old file is kept as a `.bak-` copy), or decide later. For files the installer customised, it recommends keeping yours.
+
+Limitations: it covers everyday tasks, not everything Portage can do. It does not edit USE flags for you except when Portage asks for a change, and it does not manage overlays. Portage builds use `--quiet-build`, so compiler output goes to the build logs rather than the screen. It was tested against simulated Portage output and the real `dialog` program; report anything that looks wrong.
+
 ## Files the installer creates
 
 On the new system (paths relative to its root):
@@ -299,6 +355,7 @@ On the new system (paths relative to its root):
 | `/usr/local/sbin/install-my-flatpaks` | Re-runs the Flathub setup and your app selection |
 | `/root/gentoo-install.sh`, `/root/gentoo-install.conf`, `/root/.gentoo-install-progress` | Copy of the installer that was used (either version is saved under this name), saved answers (password hashes removed after use) and step progress, kept for `--resume` and for reference. Safe to delete once the system boots. |
 | `~/GENTOO-POST-INSTALL-NOTES.txt` | Next steps, tailored to your choices |
+| `/usr/local/bin/gentoo-helper` | Menus for everyday package management (see above) |
 
 ## Repository layout and building
 
@@ -313,7 +370,8 @@ src/50-chroot.sh      the 19 steps that run inside the new system
 src/60-tui.sh         dialog/whiptail front end and the main menu (menu version only)
 src/90-main-cli.sh    entry point of gentoo-install.sh
 src/91-main-tui.sh    entry point of gentoo-install-tui.sh
-build.sh              concatenates src/ into the two installers
+gentoo-helper.sh      the package management helper (standalone; also embedded in both installers)
+build.sh              builds the two installers from src/ and gentoo-helper.sh
 ```
 
 To change anything, edit `src/`, then:
