@@ -23,7 +23,7 @@ It is meant for people who want a Gentoo system without typing the Handbook in b
 
 | Firmware | Bootloader | Init | Desktop | Root filesystem | Encryption | Installer | Machine | Result |
 |---|---|---|---|---|---|---|---|---|
-| BIOS | GRUB | openrc | KDE Plasma | xfs | none | menu (TUI) | QEMU/KVM virtual machine | Installed, boots, network works (2026-09-26) |
+| BIOS | GRUB | openrc | KDE Plasma | xfs | none | menu (CLI) | QEMU/KVM virtual machine | Installed, boots, network works (2026-09-26) |
 
 Everything else is untested so far, including UEFI, systemd-boot, LUKS encryption, Btrfs, XFS, OpenRC, the other desktops, manual partitioning, the console installer, and real hardware. `gentoo-helper` has been tested only in a sandbox with simulated Portage, not on a real system yet.
 
