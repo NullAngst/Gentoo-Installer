@@ -50,6 +50,7 @@ readonly BTRFS_OPTS="noatime,compress=zstd:1"
 readonly ESP_SIZE_MIB=1024
 readonly BOOT_SIZE_MIB=1024
 readonly MIN_DISK_GIB=20
+readonly MIN_DESKTOP_DISK_GIB=40
 readonly FLATHUB_URL="https://dl.flathub.org/repo/flathub.flatpakrepo"
 
 # GPT partition type GUIDs
@@ -211,8 +212,41 @@ show_build_log_excerpt() {
         echo
         echo "Last lines of the build log:"
         tail -n 25 "$blog"
+        echo
+        if [[ -z $errors && -n $(tail -c 1 "$blog") ]]; then
+            echo "The build log stops in the middle of a line without any error message."
+            echo "That usually means nothing more could be written: the disk is full,"
+            echo "or the filesystem was switched to read-only after a disk error."
+        fi
+        echo "Free space on the new system's root filesystem:"
+        df -h / 2>/dev/null | sed 's/^/    /' || true
         echo "------------------------------------------------------------"
     } | tee -a "$LOG"
+}
+
+# Free KiB on the filesystem holding PATH (empty if unknown).
+disk_free_kib() {
+    df -Pk "$1" 2>/dev/null | awk 'NR == 2 {print $4}' || true
+}
+
+# Delete Portage's download caches: binary packages (and with --all also source
+# archives and leftover build directories). They are only caches; Portage downloads
+# again whatever it needs later.
+free_package_caches() {
+    local dir
+    local -a dirs=()
+    dirs+=("$(portageq envvar PKGDIR 2>/dev/null || echo /var/cache/binpkgs)")
+    if [[ ${1:-} == "--all" ]]; then
+        dirs+=("$(portageq envvar DISTDIR 2>/dev/null || echo /var/cache/distfiles)")
+        dirs+=("$(portageq envvar PORTAGE_TMPDIR 2>/dev/null || echo /var/tmp)/portage")
+    fi
+    for dir in "${dirs[@]}"; do
+        dir=$(trim "$dir")
+        if [[ -n $dir && $dir != "/" && -d $dir ]]; then
+            find "$dir" -mindepth 1 -delete 2>/dev/null || true
+            log "Cleared ${dir}"
+        fi
+    done
 }
 
 trim() {
@@ -1117,22 +1151,37 @@ q_disk() {
         die "No usable disks were found. Check that the disk is connected and visible in 'lsblk'."
     fi
     say "Pick the disk to install Gentoo on. Double check the size and model: the wrong choice can destroy data on another disk."
-    choose DISK "Target disk" "${DISK:-${opts[0]%%|*}}" "${opts[@]}"
+    local bytes gib need
+    need=$(min_root_gib)
+    while true; do
+        choose DISK "Target disk" "${DISK:-${opts[0]%%|*}}" "${opts[@]}"
+        bytes=$(lsblk -bdno SIZE "$DISK" 2>/dev/null || true)
+        bytes=${bytes%%$'\n'*}
+        gib=$(( ${bytes:-0} / 1073741824 ))
+        if (( gib >= need )); then break; fi
+        warn "${DISK} has ${gib} GiB, but this installation needs at least ${need} GiB ($( [[ $DE == none ]] && echo "without a desktop" || echo "with a desktop: the desktop, the package downloads and temporary build files need the room" )). Pick another disk, or quit and give the machine a larger disk."
+    done
 
     say_pre "$(printf '  Current contents of %s:\n' "$DISK"; lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null | sed 's/^/    /')"
-
-    local bytes gib
-    bytes=$(lsblk -bdno SIZE "$DISK" 2>/dev/null || true)
-    bytes=${bytes%%$'\n'*}
-    gib=$(( bytes / 1073741824 ))
-    if (( gib < MIN_DISK_GIB )); then
-        die "${DISK} has only ${gib} GiB. At least ${MIN_DISK_GIB} GiB is required (40 GiB or more for a desktop)."
-    fi
-    if (( gib < 40 )) && [[ $DE != "none" ]]; then
-        warn "${DISK} has ${gib} GiB. A desktop install with room for updates really wants 40 GiB or more."
+    if (( gib < 60 )) && [[ $DE != "none" ]]; then
+        info "${DISK} has ${gib} GiB. That is enough to install, but 60 GiB or more leaves comfortable room for updates, which on Gentoo sometimes compile large packages."
     fi
     IS_SSD="no"
     if [[ $(cat "/sys/block/${DISK##*/}/queue/rotational" 2>/dev/null || echo 1) == "0" ]]; then IS_SSD="yes"; fi
+}
+
+# Minimum size in GiB for the target disk or root partition.
+min_root_gib() {
+    if [[ $DE == "none" ]]; then echo "$MIN_DISK_GIB"; else echo "$MIN_DESKTOP_DISK_GIB"; fi
+}
+
+# Size in GiB of the disk (automatic layout) or root partition (manual layout).
+target_root_gib() {
+    local dev=$DISK bytes
+    if [[ $PART_MODE == "manual" ]]; then dev=$ROOT_PART; fi
+    bytes=$(lsblk -bdno SIZE "$dev" 2>/dev/null || true)
+    bytes=${bytes%%$'\n'*}
+    echo $(( ${bytes:-0} / 1073741824 ))
 }
 
 q_part_mode() {
@@ -1283,18 +1332,21 @@ q_manual_partitions() {
         pick_partition BOOT_PART "Which partition should become /boot? (it will be formatted as ext4)" "$used"
         used+=" $BOOT_PART"
     fi
-    pick_partition ROOT_PART "Which partition should become the root filesystem / ? (it will be formatted)" "$used"
+    local need
+    need=$(min_root_gib)
+    while true; do
+        pick_partition ROOT_PART "Which partition should become the root filesystem / ? (it will be formatted)" "$used"
+        bytes=$(lsblk -bdno SIZE "$ROOT_PART" 2>/dev/null || true)
+        bytes=${bytes%%$'\n'*}
+        if (( ${bytes:-0} / 1073741824 >= need )); then break; fi
+        warn "${ROOT_PART} has $(( ${bytes:-0} / 1073741824 )) GiB; this installation needs at least ${need} GiB for the root filesystem. Pick a larger partition (or enlarge it with cfdisk and run the installer again)."
+    done
     used+=" $ROOT_PART"
     if [[ $SWAP_MODE == "partition" ]]; then
         pick_partition SWAP_PART "Which partition should be used as swap? (it will be formatted)" "$used"
         used+=" $SWAP_PART"
     fi
 
-    bytes=$(lsblk -bdno SIZE "$ROOT_PART" 2>/dev/null || true)
-    bytes=${bytes%%$'\n'*}
-    if (( bytes / 1073741824 < MIN_DISK_GIB )); then
-        die "${ROOT_PART} is smaller than ${MIN_DISK_GIB} GiB. Make it larger and run the installer again."
-    fi
 
     DISK="/dev/$(lsblk_field PKNAME "$ROOT_PART")"
     GRUB_DISK=""
@@ -2641,6 +2693,8 @@ c_world() {
     step_header "Update the base system" \
         "emerge now brings every installed package in line with the selected profile, USE flags and compiler settings (emerge --update --deep --newuse @world). With binary packages much of this is downloading; anything without a matching binary is compiled. This can take from a few minutes to over an hour."
     run emerge --verbose --update --deep --newuse @world
+    info "Deleting the downloaded binary packages (already installed; they only take up space)."
+    free_package_caches
 }
 
 c_base_tools() {
@@ -2879,6 +2933,8 @@ c_desktop() {
     if [[ $DM == "sddm" ]] && getent passwd sddm >/dev/null; then
         usermod -aG video sddm || true
     fi
+    info "Deleting the downloaded binary packages (already installed; they only take up space)."
+    free_package_caches
 }
 
 setup_zram() {
@@ -3266,6 +3322,9 @@ c_finish() {
         if getent group "$g" >/dev/null; then usermod -aG "$g" "$USERNAME"; fi
     done
     ok "${USERNAME} is in groups: $(id -nG "$USERNAME")"
+    info "Deleting Portage's download caches (binary packages and source archives) to free disk space."
+    free_package_caches --all
+    ok "Free space on /: $(df -h / | awk 'NR == 2 {print $4}')"
     setup_user_desktop
     write_notes
     local news
@@ -3273,6 +3332,42 @@ c_finish() {
     if [[ $news =~ ^[0-9]+$ ]] && (( news > 0 )); then
         info "There are ${news} unread Gentoo news items. Read them after booting with: eselect news read"
     fi
+}
+
+# Rough minimum free space (GiB) needed before a step starts.
+step_min_free_gib() {
+    case "$1" in
+        c_world) echo 4 ;;
+        c_desktop)
+            case "$DE" in
+                plasma|gnome|cinnamon) echo 8 ;;
+                none) echo 1 ;;
+                *) echo 4 ;;
+            esac ;;
+        c_software) echo 3 ;;
+        c_kernel|c_firmware|c_bootloader_prep|c_base_tools|c_hardware) echo 2 ;;
+        *) echo 1 ;;
+    esac
+}
+
+# Stop before a step when the disk is nearly full, instead of failing in the
+# middle of a build with a cut-off log. Clears Portage's caches first.
+check_disk_space() {
+    local need_gib avail_kib
+    need_gib=$(step_min_free_gib "$1")
+    avail_kib=$(disk_free_kib /)
+    [[ $avail_kib =~ ^[0-9]+$ ]] || return 0
+    if (( avail_kib >= need_gib * 1048576 )); then return 0; fi
+    warn "Only $(( avail_kib / 1024 )) MiB free on the new system; this step needs roughly ${need_gib} GiB. Clearing Portage's download caches and leftover build directories."
+    free_package_caches --all
+    avail_kib=$(disk_free_kib /)
+    if (( avail_kib >= need_gib * 1048576 )); then
+        ok "Now $(( avail_kib / 1024 )) MiB free."
+        return 0
+    fi
+    say "Space used by the largest directories:"
+    du -xsh /usr /var /opt /home /root 2>/dev/null | sort -rh | sed 's/^/    /' || true
+    die "Not enough disk space: $(( avail_kib / 1024 )) MiB free, roughly ${need_gib} GiB needed for the next step. The disk (or root partition) is too small for this installation; ${MIN_DESKTOP_DISK_GIB} GiB or more is needed for a desktop. Enlarge it, or start over on a larger disk."
 }
 
 chroot_stage() {
@@ -3294,6 +3389,7 @@ chroot_stage() {
             info "Step ${CURRENT_STEP} (${s}) was already completed; skipping."
             continue
         fi
+        check_disk_space "$s"
         "$s"
         echo "$s" >>"$PROGRESS_PATH"
         ok "Step ${CURRENT_STEP} finished."
