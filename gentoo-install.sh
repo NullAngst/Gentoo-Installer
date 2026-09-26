@@ -15,6 +15,22 @@
 #  Every question is asked first, with an explanation of each option. After
 #  you confirm, the installation runs unattended. If a step fails, fix the
 #  cause and run the script again with --resume; finished steps are skipped.
+#
+#  How to run (from the official Gentoo live image, as root)
+#  ---------------------------------------------------------
+#    curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/main/gentoo-install.sh
+#    bash gentoo-install.sh
+#
+#  Do not pipe it into bash (curl ... | bash). The script is interactive and
+#  reads your answers from the keyboard.
+#
+#  Options
+#    --resume   Continue an installation that stopped because of an error
+#    --help     Show help
+#
+#  Logs
+#    /tmp/gentoo-install.log        (live system)
+#    /var/log/gentoo-install.log    (inside the new system)
 # =============================================================================
 
 set -Eeuo pipefail
@@ -162,10 +178,41 @@ die()  { err "$*"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # run CMD ARGS...: show the command, run it, copy its output into the log.
+# RUN_CMD remembers the command, because when it fails the error trap only sees
+# the last part of the pipeline (tee).
+RUN_CMD=""
 run() {
     printf '%s    $ %s%s\n' "$C_DIM" "$*" "$C_RESET"
     log "RUN: $*"
+    RUN_CMD="$*"
     "$@" 2>&1 | tee -a "$LOG"
+}
+
+# After a failed emerge: show where Portage kept the package's own build log,
+# and the lines of it that usually explain the failure.
+show_build_log_excerpt() {
+    local blog errors
+    blog=$(grep -o "The complete build log is located at '[^']*'" "$LOG" 2>/dev/null | tail -n1 || true)
+    blog=${blog#*located at \'}
+    blog=${blog%\'}
+    if [[ -z $blog || ! -r $blog ]]; then return 0; fi
+    errors=$(grep -nE "error:|Error [0-9]+|No such file or directory|Illegal instruction|Segmentation fault|Killed|undefined reference|command not found|can't get .--help' info" "$blog" 2>/dev/null \
+        | grep -vE "^[0-9]+:(checking|configure:)|-Werror|-Wno-error" || true)
+    {
+        echo
+        echo "---- Why it failed: lines from the package's build log ----"
+        echo "Build log: ${blog}"
+        echo "(from the live system: ${MNT}${blog})"
+        if [[ -n $errors ]]; then
+            echo
+            echo "First error lines:"
+            head -n 12 <<<"$errors"
+        fi
+        echo
+        echo "Last lines of the build log:"
+        tail -n 25 "$blog"
+        echo "------------------------------------------------------------"
+    } | tee -a "$LOG"
 }
 
 trim() {
@@ -192,12 +239,15 @@ on_error() {
     trap - ERR
     if [[ ${TUI_ACTIVE:-no} == "yes" ]]; then clear 2>/dev/null || true; TUI_ACTIVE="no"; fi
     if (( rc == 0 )); then rc=1; fi
+    # shellcheck disable=SC2016  # the literal text of run's tee command, as the trap reports it
+    if [[ $cmd == 'tee -a "$LOG"' && -n ${RUN_CMD:-} ]]; then cmd=$RUN_CMD; fi
     echo
     err "A command failed (exit code ${rc}, script line ${line}):"
     err "    ${cmd}"
     err "Full log: ${LOG}"
     if [[ $IN_CHROOT == "yes" ]]; then
         err "This happened inside the new system during step ${CURRENT_STEP:-unknown}."
+        if [[ $cmd == emerge* ]]; then show_build_log_excerpt; fi
     else
         print_resume_help
     fi
