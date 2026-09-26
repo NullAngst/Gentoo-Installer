@@ -216,6 +216,13 @@ show_build_log_excerpt() {
         echo "Last lines of the build log:"
         tail -n 25 "$blog"
         echo
+        if grep -q "Can't locate .*\.pm in @INC" "$blog" 2>/dev/null; then
+            echo "A Perl module could not be loaded. This usually happens after Perl was"
+            echo "upgraded and its modules were not rebuilt. Fix it from the live system with:"
+            echo "  chroot ${MNT} /bin/bash -c 'source /etc/profile && perl-cleaner --all -- --quiet-build=y'"
+            echo "then resume the installer."
+            echo
+        fi
         if [[ -z $errors && -n $(tail -c 1 "$blog") ]]; then
             echo "The build log stops in the middle of a line without any error message:"
             echo "the build lost its output channel before it could report anything."
@@ -2717,6 +2724,16 @@ c_world() {
     step_header "Update the base system" \
         "emerge now brings every installed package in line with the selected profile, USE flags and compiler settings (emerge --update --deep --newuse @world). With binary packages much of this is downloading; anything without a matching binary is compiled. This can take from a few minutes to over an hour."
     run emerge "${EMERGE_OPTS[@]}" --update --deep --newuse @world
+    # When the update brings a new Perl version, Perl modules built for the old
+    # one (for example Locale::gettext, which help2man needs to build GRUB's
+    # manual pages) stop loading until they are rebuilt. perl-cleaner does that,
+    # and does nothing when there is nothing to rebuild.
+    if have perl-cleaner; then
+        info "Rebuilding Perl modules left over from an older Perl version, if any (perl-cleaner)."
+        local edo
+        edo=$(portageq envvar EMERGE_DEFAULT_OPTS 2>/dev/null || true)
+        run env EMERGE_DEFAULT_OPTS="${edo} --quiet-build=y" perl-cleaner --all
+    fi
     info "Deleting the downloaded binary packages (already installed; they only take up space)."
     free_package_caches
 }
