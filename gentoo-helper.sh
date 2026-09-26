@@ -20,6 +20,7 @@
 #    gentoo-helper news             read Gentoo news
 #    gentoo-helper configs          review configuration file updates
 #    gentoo-helper flatpak          Flatpak apps
+#    gentoo-helper tasks            common tasks: printing, Wi-Fi, drivers, SSH, ...
 #    gentoo-helper help             this text
 #
 #  Log: /var/log/gentoo-helper.log
@@ -238,6 +239,68 @@ ui_yesno() {
     done
 }
 
+# ui_checklist "text" tag "label" on|off ...  ->  CHOICE = the ticked tags,
+# separated by spaces. Returns 1 when the user goes back.
+ui_checklist() {
+    local text=$1 rc i a t
+    shift
+    local -a items=("$@")
+    local n=$(( ${#items[@]} / 3 ))
+    if [[ $UI == "dialog" ]]; then
+        local maxl=20 lines lh h w
+        ui_dims
+        for (( i = 1; i < ${#items[@]}; i += 3 )); do
+            if (( ${#items[i]} > maxl )); then maxl=${#items[i]}; fi
+        done
+        w=$(( maxl + 14 ))
+        w=$(( w < 60 ? 60 : (w > UI_W ? UI_W : w) ))
+        text+=$'\n\n'"Space ticks or unticks, Enter confirms."
+        lines=$(text_lines "$text" $(( w - 4 )))
+        lh=$(( UI_MAXH - lines - 7 ))
+        lh=$(( lh > n ? n : lh ))
+        lh=$(( lh < 3 ? 3 : lh ))
+        h=$(( lines + lh + 7 ))
+        h=$(( h > UI_MAXH ? UI_MAXH : h ))
+        dlg --separate-output --no-tags --cancel-label "Back" --checklist "$text" "$h" "$w" "$lh" "${items[@]}"
+        rc=$?
+        if (( rc == 99 )); then ui_checklist "$1" "${items[@]}"; return $?; fi
+        if (( rc != 0 )); then return 1; fi
+        CHOICE=$(trim "$(tr '\n' ' ' <<<"$OUT")")
+        return 0
+    fi
+    local -a state=() tags=()
+    for (( i = 0; i < ${#items[@]}; i += 3 )); do
+        tags+=("${items[i]}")
+        state+=("${items[i+2]}")
+    done
+    while true; do
+        text_header
+        say "$text"
+        echo
+        for (( i = 0; i < n; i++ )); do
+            if [[ ${state[i]} == "on" ]]; then t="x"; else t=" "; fi
+            printf '  %2d) [%s] %s\n' $(( i + 1 )) "$t" "${items[i*3+1]}"
+        done
+        echo
+        if ! read -r -p "  Numbers to tick/untick (e.g. 2 4), Enter to continue, 0 to go back: " a; then echo; return 1; fi
+        a=$(trim "$a")
+        if [[ -z $a ]]; then break; fi
+        if [[ $a == "0" ]]; then return 1; fi
+        local -a picks=()
+        read -ra picks <<<"$a"
+        for t in "${picks[@]}"; do
+            if [[ $t =~ ^[0-9]+$ ]] && (( t >= 1 && t <= n )); then
+                if [[ ${state[t-1]} == "on" ]]; then state[t-1]="off"; else state[t-1]="on"; fi
+            fi
+        done
+    done
+    CHOICE=""
+    for (( i = 0; i < n; i++ )); do
+        if [[ ${state[i]} == "on" ]]; then CHOICE+="${CHOICE:+ }${tags[i]}"; fi
+    done
+    return 0
+}
+
 # ui_input "text" "default"  ->  CHOICE. Returns 1 when cancelled or left empty.
 ui_input() {
     local text=$1 def=${2:-} rc a
@@ -453,15 +516,12 @@ count_lines() {
     echo "${c:-0}"
 }
 
-# confirm_plan "what this is": show the plan and ask. Returns 1 when there is
-# nothing to do or the user says no.
+# confirm_plan "what this is": show the plan and ask. Returns 1 when the user
+# says no, 3 when there is nothing to do.
 confirm_plan() {
     local what=$1 list nbin nsrc total text f
     list=$(plan_list)
-    if [[ -z $list ]]; then
-        ui_msg "Nothing to do: everything needed for this is already installed and up to date."
-        return 1
-    fi
+    if [[ -z $list ]]; then return 3; fi
     nbin=$(count_lines '^\[binary')
     nsrc=$(count_lines '^\[ebuild')
     total=$(grep -m1 '^Total:' <<<"$PLAN_OUT" || true)
@@ -573,18 +633,33 @@ handle_plan_failure() {
 }
 
 # plan_and_run "description" ARGS...: plan, fix settings if needed, confirm, run.
-# Returns 0 on success, 1 when cancelled or nothing to do, 2 when emerge failed.
+# Returns 0 on success, 1 when cancelled, 2 when emerge failed, 3 when there
+# was nothing to do.
 plan_and_run() {
-    local what=$1 round
+    local what=$1 round rc
     shift
     for round in 1 2 3 4; do
         make_plan "$@"
         if (( PLAN_RC == 0 )); then break; fi
         if (( round == 4 )) || ! handle_plan_failure "$what"; then return 1; fi
     done
-    if ! confirm_plan "$what"; then return 1; fi
+    confirm_plan "$what"
+    rc=$?
+    if (( rc == 3 )); then return 3; fi
+    if (( rc != 0 )); then return 1; fi
     if run_emerge "$@"; then return 0; fi
     return 2
+}
+
+# install_packages "description" PKG...: install whatever is missing (packages
+# already installed are left alone). Returns 0 when everything is in place.
+install_packages() {
+    local what=$1 rc
+    shift
+    plan_and_run "$what" --noreplace "$@"
+    rc=$?
+    if (( rc == 0 || rc == 3 )); then return 0; fi
+    return 1
 }
 
 # ----------------------------------------------------------------------------
@@ -749,6 +824,7 @@ package_actions() {
         source) plan_and_run "Install ${name} (compiled on this computer)" --usepkg=n --getbinpkg=n "$name"; rc=$? ;;
         *) return 0 ;;
     esac
+    if (( rc == 3 )); then ui_msg "Nothing to do: ${name} and everything it needs are already installed."; fi
     if (( rc == 0 )); then
         TITLE=$name
         ui_msg "${name} is installed. Desktop programs appear in your application menu (you may need to log out and back in). Command-line programs are started by typing their name in a terminal."
@@ -858,9 +934,7 @@ update_flow() {
     TITLE="Update the system"
     plan_and_run "System update" --update --deep --newuse --keep-going=y @world
     rc=$?
-    if (( rc == 1 )) && [[ -z $(plan_list) ]] && (( PLAN_RC == 0 )); then
-        : # "Nothing to do" was already shown
-    fi
+    if (( rc == 3 )); then ui_msg "Everything is already up to date."; fi
     after_update "$perl_before"
 }
 
@@ -923,7 +997,7 @@ space_flow() {
     TITLE="Free disk space"
     if ! have eclean-dist; then
         if ui_yesno "This needs the gentoolkit package (small). Install it now?" y; then
-            plan_and_run "Install gentoolkit" app-portage/gentoolkit || return 0
+            install_packages "Install gentoolkit" app-portage/gentoolkit || return 0
         else
             return 0
         fi
@@ -951,7 +1025,7 @@ kernels_flow() {
     TITLE="Remove old kernels"
     if ! have eclean-kernel; then
         if ui_yesno "This needs the eclean-kernel package (small). Install it now?" y; then
-            plan_and_run "Install eclean-kernel" app-admin/eclean-kernel || return 0
+            install_packages "Install eclean-kernel" app-admin/eclean-kernel || return 0
         else
             return 0
         fi
@@ -1261,7 +1335,7 @@ flatpak_menu() {
     TITLE="Flatpak apps"
     if ! have flatpak; then
         if ui_yesno "Flatpak installs desktop apps (Spotify, Discord, Steam and many more) from Flathub, ready-made and sandboxed. It is not installed yet. Install it now?" y; then
-            plan_and_run "Install Flatpak" sys-apps/flatpak || return 0
+            install_packages "Install Flatpak" sys-apps/flatpak || return 0
             have flatpak || return 0
             flathub_ready || true
         else
@@ -1289,6 +1363,656 @@ flatpak_menu() {
                 flatpak list --app --columns=name,application,version >"$f" 2>&1
                 TITLE="Installed Flatpak apps"
                 ui_file "$f" ;;
+        esac
+    done
+}
+
+# ----------------------------------------------------------------------------
+# Common tasks: hardware and features, set up in one go
+# ----------------------------------------------------------------------------
+GROUPS_ADDED=""
+
+init_system() {
+    if [[ -d /run/systemd/system ]]; then echo "systemd"; else echo "openrc"; fi
+}
+
+# pkg_installed CATEGORY/NAME
+pkg_installed() {
+    compgen -G "/var/db/pkg/${1}-[0-9]*" >/dev/null
+}
+
+# pkg_has_use CATEGORY/NAME FLAG: installed and built with FLAG
+pkg_has_use() {
+    local d
+    for d in /var/db/pkg/"${1}"-[0-9]*; do
+        [[ -r $d/USE ]] || continue
+        if [[ " $(<"$d/USE") " == *" $2 "* ]]; then return 0; fi
+    done
+    return 1
+}
+
+# svc_unit NAME...: the first of the given service names that exists on this
+# system. Give the OpenRC name and the systemd unit (for example: cupsd cups.service).
+svc_unit() {
+    local n init
+    init=$(init_system)
+    for n in "$@"; do
+        if [[ $init == "systemd" ]]; then
+            if [[ $n != *.* ]]; then n="${n}.service"; fi
+            if [[ -n $(systemctl list-unit-files --no-legend "$n" 2>/dev/null) ]]; then echo "$n"; return 0; fi
+        else
+            if [[ $n == *.* ]]; then continue; fi
+            if [[ -x /etc/init.d/$n ]]; then echo "$n"; return 0; fi
+        fi
+    done
+    return 1
+}
+
+svc_active() {
+    local u
+    u=$(svc_unit "$@") || return 1
+    if [[ $(init_system) == "systemd" ]]; then
+        systemctl is-active --quiet "$u"
+    else
+        rc-service "$u" status >/dev/null 2>&1
+    fi
+}
+
+svc_enabled() {
+    local u shown
+    u=$(svc_unit "$@") || return 1
+    if [[ $(init_system) == "systemd" ]]; then
+        systemctl is-enabled --quiet "$u"
+    else
+        shown=$(rc-update show default 2>/dev/null; rc-update show boot 2>/dev/null)
+        grep -Eq "^[[:space:]]*${u}[[:space:]]*\|" <<<"$shown"
+    fi
+}
+
+# svc_enable_now NAME...: start the service now and at every boot
+svc_enable_now() {
+    local u rc=0
+    u=$(svc_unit "$@") || { log "No service found among: $*"; return 1; }
+    if [[ $(init_system) == "systemd" ]]; then
+        systemctl enable --now "$u" >>"$LOG" 2>&1 || rc=$?
+    else
+        rc-update add "$u" default >>"$LOG" 2>&1
+        rc-service "$u" start >>"$LOG" 2>&1 || rc=$?
+    fi
+    log "Enable and start ${u}: exit ${rc}"
+    return "$rc"
+}
+
+# svc_disable_now NAME...: stop the service and do not start it at boot
+svc_disable_now() {
+    local u
+    u=$(svc_unit "$@") || return 0
+    if [[ $(init_system) == "systemd" ]]; then
+        systemctl disable --now "$u" >>"$LOG" 2>&1
+    else
+        rc-service "$u" stop >>"$LOG" 2>&1
+        rc-update del "$u" default >>"$LOG" 2>&1
+    fi
+    log "Disable and stop ${u}"
+    return 0
+}
+
+# The everyday (non-root) user this helper is working for.
+target_user() {
+    local u=${SUDO_USER:-${DOAS_USER:-}}
+    if [[ -n $u && $u != "root" ]]; then echo "$u"; return 0; fi
+    getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}'
+}
+
+# add_user_groups GROUP...: add the everyday user to these groups (if they exist).
+# Sets GROUPS_ADDED to the groups that were actually added.
+add_user_groups() {
+    local user g current added=""
+    user=$(target_user)
+    GROUPS_ADDED=""
+    if [[ -z $user ]]; then return 0; fi
+    current=" $(id -nG "$user" 2>/dev/null) "
+    for g in "$@"; do
+        if getent group "$g" >/dev/null && [[ $current != *" $g "* ]]; then
+            if usermod -aG "$g" "$user" >>"$LOG" 2>&1; then added+="${added:+ }${g}"; fi
+        fi
+    done
+    GROUPS_ADDED=$added
+    if [[ -n $added ]]; then log "Added ${user} to groups: ${added}"; fi
+}
+
+groups_note() {
+    if [[ -n $GROUPS_ADDED ]]; then
+        printf '%s' $'\n\n'"Your user was added to the group(s): ${GROUPS_ADDED}. Log out and back in for that to take effect."
+    fi
+}
+
+# pci_devices CLASS_PREFIX: "slot|vendor|driver in use|name" for matching PCI devices
+pci_devices() {
+    local d class vendor drv name slot
+    for d in /sys/bus/pci/devices/*; do
+        [[ -r $d/class ]] || continue
+        class=$(<"$d/class")
+        [[ $class == "$1"* ]] || continue
+        vendor=$(<"$d/vendor")
+        slot=${d##*/}
+        drv="none"
+        if [[ -L $d/driver ]]; then drv=$(basename "$(readlink "$d/driver")"); fi
+        name=""
+        if have lspci; then name=$(lspci -s "$slot" 2>/dev/null | cut -d' ' -f2-); fi
+        printf '%s|%s|%s|%s\n' "$slot" "$vendor" "$drv" "${name:-PCI device ${slot}}"
+    done
+}
+
+wifi_ifaces() {
+    local n out=""
+    for n in /sys/class/net/*; do
+        if [[ -d $n/wireless || -e $n/phy80211 ]]; then out+="${out:+ }${n##*/}"; fi
+    done
+    printf '%s' "$out"
+}
+
+desktop_kind() {
+    if pkg_installed kde-plasma/plasma-workspace; then echo "plasma"
+    elif pkg_installed gnome-base/gnome-shell; then echo "gnome"
+    else echo "other"; fi
+}
+
+task_status() {
+    local n
+    case "$1" in
+        printing)
+            if pkg_installed net-print/cups; then
+                if svc_enabled cupsd cups.service; then echo "set up"; else echo "installed, not running"; fi
+            fi ;;
+        scanning) if pkg_installed media-gfx/sane-backends; then echo "installed"; fi ;;
+        wifi)
+            n=$(wifi_ifaces)
+            if [[ -n $n ]]; then echo "adapter: ${n}"; else echo "no adapter found"; fi ;;
+        bluetooth)
+            if pkg_installed net-wireless/bluez; then
+                if svc_enabled bluetooth; then echo "set up"; else echo "installed, off"; fi
+            fi ;;
+        codecs) if pkg_installed media-plugins/gst-plugins-libav; then echo "installed"; fi ;;
+        ssh) if svc_active sshd; then echo "server running"; fi ;;
+        firewall)
+            if have ufw && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then echo "on"; fi ;;
+        vms) if pkg_installed app-emulation/virt-manager; then echo "installed"; fi ;;
+    esac
+}
+
+task_label() {
+    local st
+    st=$(task_status "$1")
+    printf '%s%s' "$2" "${st:+   [${st}]}"
+}
+
+task_printing() {
+    local sel note=""
+    local -a items=(
+        net-print/cups "CUPS printing system (required)" on
+        net-dns/avahi "Find network printers automatically (Avahi)" on
+        net-print/gutenprint "Drivers for many older Canon, Epson and other printers" on
+        net-print/hplip "Drivers for HP printers (also HP scanners)" off
+    )
+    local -a pkgs=()
+    TITLE="Printing"
+    if [[ $(desktop_kind) == "plasma" ]]; then
+        items+=(kde-plasma/print-manager "Printers page in KDE System Settings" on)
+    fi
+    if ! ui_checklist "Printing on Linux goes through CUPS. Most printers from the last ten years print without any driver (driverless printing, also called IPP Everywhere or AirPrint) as long as they can be found on the network. Older printers need a driver package. Choose what to install:" "${items[@]}"; then
+        return 0
+    fi
+    sel=$CHOICE
+    if [[ " $sel " != *" net-print/cups "* ]]; then sel="net-print/cups ${sel}"; fi
+    read -ra pkgs <<<"$sel"
+    install_packages "Printing support" "${pkgs[@]}" || return 0
+    svc_enable_now cupsd cups.service || note+=$'\n'"The CUPS service could not be started; see ${LOG}."
+    if pkg_installed net-dns/avahi; then
+        svc_enable_now avahi-daemon || note+=$'\n'"The Avahi service could not be started; see ${LOG}."
+    fi
+    add_user_groups lp lpadmin
+    if [[ " $(portageq envvar USE 2>/dev/null) " != *" cups "* ]]; then
+        note+=$'\n\n'"Note: the 'cups' USE flag is not enabled globally, so some programs may not offer printing. Desktop profiles normally enable it."
+    fi
+    TITLE="Printing"
+    ui_msg "Printing is set up.${note}"$'\n\n'"To add a printer:"$'\n'"- KDE Plasma: System Settings > Printers"$'\n'"- GNOME: Settings > Printers"$'\n'"- Any desktop: open http://localhost:631 in a web browser, choose Administration > Add Printer, and log in with your user name and password."$'\n\n'"Network printers are often found automatically; for USB printers, plug them in first.$(groups_note)"
+}
+
+task_scanning() {
+    local sel note=""
+    local -a pkgs=()
+    local -a items=(
+        media-gfx/sane-backends "Scanner drivers (SANE, required)" on
+        media-gfx/sane-airscan "Driverless scanning for most network and USB scanners made since about 2015" on
+        media-gfx/simple-scan "Document Scanner, a simple scanning app" on
+        net-print/hplip "Drivers for HP scanners and all-in-ones" off
+    )
+    TITLE="Scanners"
+    if ! ui_checklist "Scanning uses SANE. Most recent scanners and all-in-one printers work driverless through sane-airscan. Choose what to install:" "${items[@]}"; then
+        return 0
+    fi
+    sel=$CHOICE
+    if [[ " $sel " != *" media-gfx/sane-backends "* ]]; then sel="media-gfx/sane-backends ${sel}"; fi
+    read -ra pkgs <<<"$sel"
+    install_packages "Scanner support" "${pkgs[@]}" || return 0
+    if pkg_installed net-dns/avahi; then
+        svc_enable_now avahi-daemon || note+=$'\n'"The Avahi service (network scanner discovery) could not be started; see ${LOG}."
+    fi
+    add_user_groups scanner lp usb plugdev
+    TITLE="Scanners"
+    ui_msg "Scanner support is installed.${note}"$'\n\n'"Open 'Document Scanner' from the application menu. Network scanners are found automatically; USB scanners should be plugged in first.$(groups_note)"
+}
+
+task_wifi() {
+    local ifaces dev devs="" slot vendor drv name rf="" sel note="" restart="no" wlan_pci
+    local -a pkgs=() items=()
+    TITLE="Wi-Fi"
+    busy "Looking for Wi-Fi hardware..."
+    ifaces=$(wifi_ifaces)
+    while IFS='|' read -r slot vendor drv name; do
+        [[ -n $slot ]] || continue
+        devs+=$'\n'"  ${name}"$'\n'"    driver in use: ${drv}"
+    done < <(pci_devices "0x0280")
+    if have lsusb; then
+        while IFS= read -r dev; do
+            devs+=$'\n'"  USB: ${dev#*ID }"
+        done < <(lsusb 2>/dev/null | grep -iE "wireless|wlan|wi-fi|802\.11" || true)
+    fi
+    if have rfkill; then rf=$(rfkill list wifi 2>/dev/null || true); fi
+    local text="Wi-Fi adapters found:${devs:-$'\n'"  none that the system recognises as Wi-Fi"}"$'\n'"Wi-Fi network interfaces: ${ifaces:-none}"
+    if [[ $rf == *"Hard blocked: yes"* ]]; then
+        text+=$'\n\n'"Wi-Fi is switched off by a hardware switch or key (for example Fn+F2 or an airplane-mode key). Switch it on there."
+    fi
+    if [[ -z $devs && -z $ifaces ]]; then
+        text+=$'\n\n'"No Wi-Fi adapter was found. On a virtual machine that is normal. On real hardware, a USB adapter may need to be plugged in, or it may need the firmware or driver below."
+    elif [[ -n $devs && -z $ifaces ]]; then
+        text+=$'\n\n'"An adapter is present but has no network interface: it is most likely missing its firmware or driver. Installing linux-firmware usually fixes this."
+    fi
+    items+=(sys-kernel/linux-firmware "Firmware for Wi-Fi adapters (most Intel, Realtek, MediaTek and Atheros cards need it)" on)
+    items+=(net-wireless/wireless-regdb "Wireless regulatory database (allows the channels permitted in your country)" on)
+    items+=(net-misc/networkmanager "NetworkManager: connect from the network icon, or with 'nmtui' in a terminal" on)
+    items+=(net-wireless/iw "iw, a Wi-Fi diagnostics tool" off)
+    wlan_pci=$(pci_devices "0x0280")
+    if [[ $wlan_pci == *"|0x14e4|"* ]]; then
+        items+=(net-wireless/broadcom-sta "Broadcom 'wl' driver (proprietary; only for Broadcom cards the open drivers do not support)" off)
+    fi
+    if ! ui_checklist "${text}"$'\n\n'"Choose what to install:" "${items[@]}"; then return 0; fi
+    sel=$CHOICE
+    read -ra pkgs <<<"$sel"
+    if (( ${#pkgs[@]} > 0 )); then
+        if [[ " $sel " == *" sys-kernel/linux-firmware "* ]] && ! pkg_installed sys-kernel/linux-firmware; then restart="yes"; fi
+        if [[ " $sel " == *" net-wireless/broadcom-sta "* ]]; then restart="yes"; fi
+        install_packages "Wi-Fi support" "${pkgs[@]}" || return 0
+    fi
+    if pkg_installed net-misc/networkmanager && ! svc_enabled NetworkManager; then
+        TITLE="Wi-Fi"
+        if ui_yesno "NetworkManager is installed but is not managing the network yet. Switch to it? It takes over wired connections too; the connection may drop for a few seconds while it starts." y; then
+            svc_disable_now dhcpcd
+            svc_disable_now systemd-networkd
+            svc_enable_now NetworkManager || note+=$'\n'"NetworkManager could not be started; see ${LOG}."
+        fi
+    fi
+    if [[ $rf == *"Soft blocked: yes"* ]]; then
+        rfkill unblock wifi >>"$LOG" 2>&1 && note+=$'\n'"Wi-Fi was switched off in software; it has been switched on."
+    fi
+    if [[ $restart == "yes" ]]; then note+=$'\n\n'"Restart the computer so the adapter can load its new firmware or driver."; fi
+    TITLE="Wi-Fi"
+    ui_msg "Done.${note}"$'\n\n'"To connect: click the network icon in your desktop's panel, or run 'nmtui' in a terminal and choose 'Activate a connection'."
+}
+
+task_bluetooth() {
+    local sel note="" kind hw="no"
+    local -a pkgs=() items=()
+    TITLE="Bluetooth"
+    if compgen -G "/sys/class/bluetooth/hci*" >/dev/null; then hw="yes"; fi
+    kind=$(desktop_kind)
+    items+=(net-wireless/bluez "Bluetooth system (BlueZ, required)" on)
+    case "$kind" in
+        plasma) items+=(kde-plasma/bluedevil "Bluetooth in KDE System Settings and the panel" on) ;;
+        gnome) items+=(net-wireless/gnome-bluetooth "Bluetooth in GNOME Settings" on) ;;
+        *) items+=(net-wireless/blueman "Blueman, a Bluetooth manager with a tray icon" on) ;;
+    esac
+    if pkg_installed media-video/pipewire && ! pkg_has_use media-video/pipewire bluetooth; then
+        items+=(pipewire-bt "Bluetooth headphones and speakers (rebuilds PipeWire with Bluetooth support)" on)
+    fi
+    local text="Bluetooth adapter found: ${hw}."
+    if [[ $hw == "no" ]]; then text+=" (Many adapters only show up once the Bluetooth system is installed and its firmware is present, so installing can still help. On a virtual machine there is usually none.)"; fi
+    if ! ui_checklist "${text}"$'\n\n'"Choose what to install:" "${items[@]}"; then return 0; fi
+    sel=$CHOICE
+    if [[ " $sel " != *" net-wireless/bluez "* ]]; then sel="net-wireless/bluez ${sel}"; fi
+    local audio="no"
+    if [[ " $sel " == *" pipewire-bt "* ]]; then audio="yes"; sel=${sel//pipewire-bt/}; fi
+    read -ra pkgs <<<"$sel"
+    install_packages "Bluetooth support" "${pkgs[@]}" || return 0
+    if [[ $audio == "yes" ]]; then
+        add_settings "$USE_FILE" "media-video/pipewire bluetooth" "Bluetooth audio"
+        plan_and_run "Rebuild PipeWire with Bluetooth audio" --oneshot --update --newuse media-video/pipewire
+    fi
+    svc_enable_now bluetooth || note+=$'\n'"The Bluetooth service could not be started; see ${LOG}."
+    add_user_groups plugdev
+    TITLE="Bluetooth"
+    ui_msg "Bluetooth is set up.${note}"$'\n\n'"Pair devices from the Bluetooth icon or your desktop's settings, or with 'bluetoothctl' in a terminal. If audio devices were added, log out and back in once.$(groups_note)"
+}
+
+# Kernel package that is installed (needed to rebuild the initramfs).
+kernel_package() {
+    local k
+    for k in sys-kernel/gentoo-kernel-bin sys-kernel/gentoo-kernel; do
+        if pkg_installed "$k"; then echo "$k"; return 0; fi
+    done
+    return 1
+}
+
+# Add a value to VIDEO_CARDS in make.conf (a backup is kept).
+add_video_card() {
+    local card=$1 f=/etc/portage/make.conf cur
+    [[ -f $f ]] || return 1
+    cur=$(sed -n 's/^VIDEO_CARDS="\(.*\)"/\1/p' "$f" | tail -n1)
+    if [[ " $cur " == *" $card "* ]]; then return 0; fi
+    cp -p "$f" "${f}.bak-$(date +%Y%m%d-%H%M%S)"
+    if grep -q '^VIDEO_CARDS=' "$f"; then
+        sed -i "s/^VIDEO_CARDS=\".*\"/VIDEO_CARDS=\"$(trim "${cur} ${card}")\"/" "$f"
+    else
+        printf '\n# Added by gentoo-helper\nVIDEO_CARDS="%s"\n' "$card" >>"$f"
+    fi
+    log "VIDEO_CARDS: added ${card}"
+}
+
+task_graphics() {
+    local slot vendor drv name summary="" has_nv="no" has_intel="no" has_amd="no" f
+    local -a items=()
+    while true; do
+        TITLE="Graphics drivers"
+        summary=""
+        has_nv="no"; has_intel="no"; has_amd="no"
+        while IFS='|' read -r slot vendor drv name; do
+            [[ -n $slot ]] || continue
+            summary+=$'\n'"  ${name}"$'\n'"    driver in use: ${drv}"
+            case "$vendor" in
+                0x10de) has_nv="yes" ;;
+                0x8086) has_intel="yes" ;;
+                0x1002) has_amd="yes" ;;
+            esac
+        done < <(pci_devices "0x03")
+        local text="Graphics hardware:${summary:-$'\n'"  none found"}"
+        if [[ $has_amd == "yes" || $has_intel == "yes" ]]; then
+            text+=$'\n\n'"AMD and Intel graphics use the open-source drivers (Mesa) that are already installed; 3D and video work out of the box."
+        fi
+        items=()
+        if [[ $has_nv == "yes" ]]; then items+=(nvidia "Install the NVIDIA proprietary driver (best performance for NVIDIA cards)"); fi
+        if [[ $has_intel == "yes" ]]; then items+=(intelva "Hardware video decoding for Intel graphics (smoother video, less battery use)"); fi
+        items+=(info "Show detailed graphics information")
+        if ! ui_menu "$text" "${items[0]}" "${items[@]}"; then return 0; fi
+        case "$CHOICE" in
+            nvidia) task_nvidia ;;
+            intelva)
+                local sel
+                local -a pkgs=()
+                if ui_checklist "Intel video decoding drivers (VA-API):" \
+                    media-libs/libva-intel-media-driver "Intel graphics from 2014 (Broadwell) and newer" on \
+                    x11-libs/libva-intel-driver "Older Intel graphics (before 2014)" off \
+                    media-video/libva-utils "vainfo, to check that it works" on; then
+                    sel=$CHOICE
+                    read -ra pkgs <<<"$sel"
+                    if (( ${#pkgs[@]} > 0 )) && install_packages "Intel video decoding" "${pkgs[@]}"; then
+                        ui_msg "Installed. Video players and browsers that support VA-API use it automatically; run 'vainfo' in a terminal to see what your graphics can decode."
+                    fi
+                fi ;;
+            info)
+                f=$(tmpfile)
+                {
+                    echo "Graphics devices and their drivers (lspci -k):"
+                    echo
+                    if have lspci; then lspci -k 2>/dev/null | grep -A3 -Ei "vga|3d controller|display controller"; else echo "(lspci is not installed)"; fi
+                    echo
+                    echo "VIDEO_CARDS in /etc/portage/make.conf:"
+                    grep '^VIDEO_CARDS=' /etc/portage/make.conf 2>/dev/null || echo "(not set)"
+                    echo
+                    echo "Kernel modules loaded:"
+                    grep -E "^(nvidia|nouveau|amdgpu|radeon|i915|xe) " /proc/modules 2>/dev/null | awk '{print "  " $1}'
+                } >"$f"
+                TITLE="Graphics information"
+                ui_file "$f" ;;
+        esac
+    done
+}
+
+task_nvidia() {
+    local kpkg note=""
+    TITLE="NVIDIA driver"
+    if pkg_installed x11-drivers/nvidia-drivers; then
+        ui_msg "The NVIDIA proprietary driver is already installed. It is updated with the regular system update, and rebuilt automatically when the kernel changes."
+        return 0
+    fi
+    if ! ui_yesno "This installs NVIDIA's proprietary driver:"$'\n\n'"1. Installs x11-drivers/nvidia-drivers (you will be asked to accept NVIDIA's licence)."$'\n'"2. Adds 'nvidia' to VIDEO_CARDS in /etc/portage/make.conf (a backup is kept)."$'\n'"3. Turns on kernel mode setting for it (needed for Wayland desktops) in /etc/modprobe.d/."$'\n'"4. Rebuilds the initramfs so the open-source nouveau driver no longer loads first."$'\n\n'"Current driver branches support GeForce GTX 16xx, RTX and newer best. For GTX 10xx and older cards, check the Gentoo wiki page 'NVIDIA/nvidia-drivers' first: newer branches are dropping older cards."$'\n\n'"A restart is needed afterwards. Continue?" y; then
+        return 0
+    fi
+    install_packages "Install the NVIDIA driver" x11-drivers/nvidia-drivers || return 0
+    add_video_card nvidia || note+=$'\n'"Could not update VIDEO_CARDS in /etc/portage/make.conf."
+    if ! grep -rqsE "nvidia[-_]drm.*modeset=1" /etc/modprobe.d/ && [[ " $(cat /proc/cmdline) " != *"nvidia_drm.modeset=1"* && " $(cat /proc/cmdline) " != *"nvidia-drm.modeset=1"* ]]; then
+        if mkdir -p /etc/modprobe.d && printf '# Added by gentoo-helper: kernel mode setting for the NVIDIA driver (needed for Wayland)\noptions nvidia_drm modeset=1\n' >/etc/modprobe.d/nvidia-drm-modeset.conf; then
+            log "Wrote /etc/modprobe.d/nvidia-drm-modeset.conf"
+        else
+            note+=$'\n'"Could not write /etc/modprobe.d/nvidia-drm-modeset.conf (needed for Wayland desktops)."
+        fi
+    fi
+    if kpkg=$(kernel_package); then
+        run_visible emerge --config "$kpkg" || note+=$'\n'"Rebuilding the initramfs failed; see the output above and ${LOG}."
+        pause_text
+    else
+        note+=$'\n'"No distribution kernel was found, so the initramfs was not rebuilt. If you build your own kernel, rebuild its initramfs yourself."
+    fi
+    TITLE="NVIDIA driver"
+    ui_msg "The NVIDIA driver is installed.${note}"$'\n\n'"Restart the computer now. Afterwards, run 'Update the whole system' once so packages pick up the new VIDEO_CARDS setting."$'\n\n'"If the screen stays black after the restart, choose the previous kernel or boot entry, or switch to a text console with Ctrl+Alt+F2 and run gentoo-helper from there."
+}
+
+task_codecs() {
+    local sel
+    local -a pkgs=()
+    TITLE="Audio and video codecs"
+    if ! ui_checklist "On Gentoo, the formats a program can play are decided when it is built (USE flags), and desktop profiles already enable the common ones. Players such as VLC and mpv bring their own support. These are the shared codec libraries that other programs use (web browsers, GNOME and KDE apps):" \
+        media-video/ffmpeg "FFmpeg: nearly all audio and video formats (used by Firefox, KDE apps and many more)" on \
+        media-plugins/gst-plugins-meta "GStreamer codecs, used by GNOME and GTK apps" on \
+        media-plugins/gst-plugins-libav "GStreamer plugin for FFmpeg formats (H.264, H.265, AAC, ...)" on \
+        media-libs/libdvdcss "Play encrypted video DVDs (check that this is legal where you live)" off; then
+        return 0
+    fi
+    sel=$CHOICE
+    read -ra pkgs <<<"$sel"
+    if (( ${#pkgs[@]} == 0 )); then return 0; fi
+    install_packages "Audio and video codecs" "${pkgs[@]}" || return 0
+    TITLE="Audio and video codecs"
+    ui_msg "Codecs are installed. Restart programs that were already open."$'\n\n'"Playing almost any format now works. Recording or converting to some formats (for example H.264 with x264) needs extra USE flags on ffmpeg; the plan will tell you if a program needs one."
+}
+
+ip_addresses() {
+    ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print "  " $4 "  (" $2 ")"}'
+}
+
+task_ssh() {
+    local user note=""
+    TITLE="SSH server"
+    user=$(target_user)
+    if svc_active sshd; then
+        if ! ui_menu "The SSH server is running. From another computer on your network, connect with:"$'\n'"  ssh ${user:-yourname}@ADDRESS"$'\n\n'"This computer's addresses:"$'\n'"$(ip_addresses)" "back" \
+            back "Keep it running" \
+            off "Turn the SSH server off"; then
+            return 0
+        fi
+        if [[ $CHOICE == "off" ]]; then
+            svc_disable_now sshd
+            ui_msg "The SSH server is stopped and will not start at boot any more."
+        fi
+        return 0
+    fi
+    if ! ui_yesno "An SSH server lets you log in to this computer from another one (a terminal, or file transfer with scp/sftp). It listens on port 22."$'\n\n'"Password logins are allowed, so use a strong password for every account. Logging in directly as root with a password is not allowed by default."$'\n\n'"Install (if needed) and turn on the SSH server?" y; then
+        return 0
+    fi
+    install_packages "SSH server" net-misc/openssh || return 0
+    ssh-keygen -A >>"$LOG" 2>&1 || true
+    svc_enable_now sshd || note+=$'\n'"The SSH service could not be started; see ${LOG}."
+    if have ufw && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then
+        ufw allow ssh >>"$LOG" 2>&1 && note+=$'\n'"The firewall now allows SSH connections."
+    fi
+    ui_msg "The SSH server is on and starts at every boot.${note}"$'\n\n'"From another computer on your network, connect with:"$'\n'"  ssh ${user:-yourname}@ADDRESS"$'\n\n'"This computer's addresses:"$'\n'"$(ip_addresses)"$'\n\n'"For more security, set up SSH keys and turn off password logins (Gentoo wiki page 'SSH')."
+}
+
+task_firewall() {
+    local status allow_ssh="no" f
+    TITLE="Firewall"
+    if have ufw && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then
+        if ! ui_menu "The firewall (ufw) is on: incoming connections are blocked unless allowed." "status" \
+            status "Show the firewall rules" \
+            off "Turn the firewall off"; then
+            return 0
+        fi
+        case "$CHOICE" in
+            status)
+                f=$(tmpfile)
+                ufw status verbose >"$f" 2>&1
+                ui_file "$f" ;;
+            off)
+                if ui_yesno "Turn the firewall off?" n; then
+                    ufw disable >>"$LOG" 2>&1
+                    svc_disable_now ufw
+                    ui_msg "The firewall is off."
+                fi ;;
+        esac
+        return 0
+    fi
+    if ! ui_yesno "A firewall blocks incoming network connections you did not ask for. Programs on this computer can still connect out normally (web, updates, games); only unexpected incoming connections are refused. This sets up ufw with those rules. Continue?" y; then
+        return 0
+    fi
+    install_packages "Firewall (ufw)" net-firewall/ufw || return 0
+    if svc_active sshd; then allow_ssh="yes"; fi
+    {
+        ufw default deny incoming
+        ufw default allow outgoing
+        if [[ $allow_ssh == "yes" ]]; then ufw allow ssh; fi
+        ufw --force enable
+    } >>"$LOG" 2>&1
+    svc_enable_now ufw || true
+    status=$(ufw status 2>/dev/null || true)
+    if [[ $status == *"Status: active"* ]]; then
+        ui_msg "The firewall is on and starts at every boot.$( [[ $allow_ssh == yes ]] && printf '%s' $'\n\n'"SSH connections are still allowed because the SSH server is running." )"
+    else
+        ui_msg "ufw is installed, but turning it on failed. The details are in ${LOG}."
+    fi
+}
+
+task_fonts() {
+    local sel
+    local -a pkgs=()
+    TITLE="Fonts"
+    if ! ui_checklist "Extra fonts, mainly so documents and web pages look as intended:" \
+        media-fonts/liberation-fonts "Liberation: same sizes as Arial, Times New Roman and Courier New" on \
+        media-fonts/corefonts "Microsoft core fonts: Arial, Times New Roman, Verdana, ... (licence must be accepted)" off \
+        media-fonts/noto-cjk "Chinese, Japanese and Korean text" off \
+        media-fonts/noto-emoji "Colour emoji" on \
+        media-fonts/dejavu "DejaVu, a widely used general font family" on; then
+        return 0
+    fi
+    sel=$CHOICE
+    read -ra pkgs <<<"$sel"
+    if (( ${#pkgs[@]} == 0 )); then return 0; fi
+    install_packages "Fonts" "${pkgs[@]}" || return 0
+    ui_msg "Fonts are installed. Restart programs that were already open to see them."
+}
+
+task_archives() {
+    local sel
+    local -a pkgs=()
+    local -a items=(
+        app-arch/zip "Create .zip files" on
+        app-arch/unzip "Extract .zip files" on
+        app-arch/7zip "7-Zip: .7z and many other formats" on
+        app-arch/unrar "Extract .rar files (licence must be accepted)" off
+    )
+    TITLE="Archive formats"
+    case "$(desktop_kind)" in
+        plasma) items+=(kde-apps/ark "Ark: open and create archives from the file manager" on) ;;
+        gnome) items+=(app-arch/file-roller "File Roller: open and create archives from Files" on) ;;
+    esac
+    if ! ui_checklist "Tools to open and create compressed archives:" "${items[@]}"; then return 0; fi
+    sel=$CHOICE
+    read -ra pkgs <<<"$sel"
+    if (( ${#pkgs[@]} == 0 )); then return 0; fi
+    install_packages "Archive formats" "${pkgs[@]}" || return 0
+    ui_msg "Archive tools are installed."
+}
+
+task_vms() {
+    local virt="no" note=""
+    TITLE="Virtual machines"
+    if grep -qwE "vmx|svm" /proc/cpuinfo; then virt="yes"; fi
+    if [[ $virt == "no" ]]; then
+        ui_msg "This CPU does not report hardware virtualization (Intel VT-x or AMD-V). It may be switched off in the firmware (BIOS/UEFI) settings, or this is already a virtual machine without nested virtualization. Virtual machines would run very slowly without it."
+        ui_yesno "Install the virtual machine tools anyway?" n || return 0
+    fi
+    if ! ui_yesno "This installs Virtual Machine Manager with QEMU/KVM and libvirt, to run other operating systems in windows on this computer."$'\n\n'"It is a large install: QEMU may have to be compiled, which can take a while."$'\n\n'"Continue?" y; then
+        return 0
+    fi
+    install_packages "Virtual machines" app-emulation/virt-manager app-emulation/qemu app-emulation/libvirt || return 0
+    svc_enable_now libvirtd || note+=$'\n'"The libvirt service could not be started; see ${LOG}."
+    virsh net-autostart default >>"$LOG" 2>&1 || true
+    virsh net-start default >>"$LOG" 2>&1 || true
+    add_user_groups libvirt kvm
+    ui_msg "Virtual machine tools are installed.${note}"$'\n\n'"Open 'Virtual Machine Manager' from the application menu and click 'Create a new virtual machine'.$(groups_note)"
+}
+
+task_steam() {
+    TITLE="Steam"
+    if ! ui_yesno "Steam is easiest to run as a Flatpak: it is ready-made, and brings the 32-bit libraries games need without changing the rest of the system. Make sure the graphics driver is set up first (Common tasks > Graphics drivers)."$'\n\n'"Install Steam from Flathub?" y; then
+        return 0
+    fi
+    if ! have flatpak; then
+        install_packages "Install Flatpak" sys-apps/flatpak || return 0
+    fi
+    flathub_ready || return 0
+    if run_visible flatpak install -y --noninteractive flathub com.valvesoftware.Steam; then
+        pause_text
+        ui_msg "Steam is installed. It appears in your application menu (log out and back in if it does not)."
+    else
+        pause_text
+    fi
+}
+
+tasks_menu() {
+    local def="printing"
+    while true; do
+        TITLE="Common tasks"
+        local -a items=(
+            printing "$(task_label printing "Printing")"
+            scanning "$(task_label scanning "Scanners")"
+            wifi "$(task_label wifi "Wi-Fi")"
+            bluetooth "$(task_label bluetooth "Bluetooth")"
+            graphics "Graphics drivers (NVIDIA, Intel video decoding)"
+            codecs "$(task_label codecs "Audio and video codecs")"
+            ssh "$(task_label ssh "SSH server (log in from other computers)")"
+            firewall "$(task_label firewall "Firewall")"
+            fonts "Extra fonts (Microsoft-compatible, Asian languages, emoji)"
+            archives "Archive formats (zip, 7z, rar)"
+            vms "$(task_label vms "Virtual machines (virt-manager)")"
+            steam "Steam (games)"
+        )
+        if ! ui_menu "Set up common hardware and features. Each task explains what it installs and asks before changing anything." "$def" "${items[@]}"; then
+            return 0
+        fi
+        def=$CHOICE
+        case "$CHOICE" in
+            printing) task_printing ;;
+            scanning) task_scanning ;;
+            wifi) task_wifi ;;
+            bluetooth) task_bluetooth ;;
+            graphics) task_graphics ;;
+            codecs) task_codecs ;;
+            ssh) task_ssh ;;
+            firewall) task_firewall ;;
+            fonts) task_fonts ;;
+            archives) task_archives ;;
+            vms) task_vms ;;
+            steam) task_steam ;;
         esac
     done
 }
@@ -1334,6 +2058,12 @@ Configuration file updates
   Portage keeps your file and saves the new one next to it. Review them
   under Maintenance.
 
+Common tasks
+  Ready-made recipes for printing, scanners, Wi-Fi, Bluetooth, graphics
+  drivers, codecs, the SSH server, a firewall, fonts, archive formats,
+  virtual machines and Steam: they install what is needed, switch on the
+  right services and add your user to the right groups.
+
 Flatpak
   An alternative for desktop apps: ready-made, sandboxed, updated
   separately. Handy for big or proprietary apps (Steam, Discord, Spotify).
@@ -1363,6 +2093,7 @@ gentoo-helper ${VERSION}: simple menus for everyday Gentoo package management
   gentoo-helper news             read Gentoo news
   gentoo-helper configs          review configuration file updates
   gentoo-helper flatpak          Flatpak apps
+  gentoo-helper tasks            common tasks: printing, Wi-Fi, drivers, codecs, SSH, ...
   gentoo-helper help             this text
 
 Set GENTOO_HELPER_UI=text to use plain text menus instead of dialog.
@@ -1378,6 +2109,7 @@ main_menu() {
             update "Update the whole system (do this every week or two)" \
             install "Find and install a program or package" \
             remove "Remove a package" \
+            tasks "Common tasks: printing, Wi-Fi, drivers, codecs, SSH, firewall, ..." \
             flatpak "Flatpak apps (Flathub)" \
             maint "Maintenance and cleanup" \
             help "How this works (ready-made vs. compiled, USE flags, ...)"; then
@@ -1390,6 +2122,7 @@ main_menu() {
             update) update_flow ;;
             install) install_flow ;;
             remove) remove_flow ;;
+            tasks) tasks_menu ;;
             flatpak) flatpak_menu ;;
             maint) maint_menu ;;
             help)
@@ -1460,6 +2193,7 @@ main() {
         news) news_flow ;;
         configs|config) config_flow ;;
         flatpak) flatpak_menu ;;
+        tasks) tasks_menu ;;
         *) usage; return 1 ;;
     esac
     if [[ $UI == "dialog" ]]; then clear_screen; fi
