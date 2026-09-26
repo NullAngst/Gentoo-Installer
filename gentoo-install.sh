@@ -18,7 +18,7 @@
 #
 #  How to run (from the official Gentoo live image, as root)
 #  ---------------------------------------------------------
-#    curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/main/gentoo-install.sh
+#    curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh
 #    bash gentoo-install.sh
 #
 #  Do not pipe it into bash (curl ... | bash). The script is interactive and
