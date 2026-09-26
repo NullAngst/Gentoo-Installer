@@ -13,7 +13,15 @@ Installed systems also get **`gentoo-helper`**, simple menus for everyday packag
 
 It is meant for people who want a Gentoo system without typing the Handbook in by hand, and who still want to see what is happening and why. Every command it runs is printed and logged, and every configuration file it writes is commented.
 
-> **Status:** version 1.0.0. Both scripts pass `bash -n` and ShellCheck (with one documented exclusion for the menu version, see [Repository layout and building](#repository-layout-and-building)). The questionnaire, configuration writers, resume logic and generated partition tables have been tested in a sandbox with stubbed hardware, and the partition tables were validated with util-linux `sfdisk`. The menu version was driven end to end through a scripted stand-in for `dialog` and `whiptail`, and its widgets were checked against the real `dialog` 1.3 and `whiptail` 0.52 programs, including an 80x24 terminal. Neither script has **yet** been run against real hardware or a real virtual machine from start to finish. Test it in a VM first (see [Testing in a virtual machine](#testing-in-a-virtual-machine)) and please open an issue with the log if something fails.
+> **Status:** version 1.1.0 (see [CHANGELOG.md](CHANGELOG.md)). One combination has been installed end to end on a virtual machine and boots to a working desktop; every other combination is untested, see [Tested combinations](#tested-combinations). Both installers and `gentoo-helper` pass `bash -n` and ShellCheck, and their logic has been exercised in a sandbox against simulated Portage, service managers and `dialog`. Test in a VM first (see [Testing in a virtual machine](#testing-in-a-virtual-machine)) and please open an issue with the log if something fails.
+
+## Tested combinations
+
+| Firmware | Bootloader | Init | Desktop | Root filesystem | Encryption | Installer | Machine | Result |
+|---|---|---|---|---|---|---|---|---|
+| BIOS | GRUB | systemd | KDE Plasma | ext4 | none | menu (TUI) | QEMU/KVM virtual machine | Installed, boots, network works (2026-09-25) |
+
+Everything else is untested so far, including UEFI, systemd-boot, LUKS encryption, Btrfs, XFS, OpenRC, the other desktops, manual partitioning, the console installer, and real hardware. `gentoo-helper` has been tested only in a sandbox with simulated Portage, not on a real system yet.
 
 ---
 
@@ -21,6 +29,7 @@ It is meant for people who want a Gentoo system without typing the Handbook in b
 
 - [What it does](#what-it-does)
 - [The menu version](#the-menu-version)
+- [Tested combinations](#tested-combinations)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [What you are asked](#what-you-are-asked)
@@ -74,7 +83,7 @@ bash gentoo-install-tui.sh
 Console version:
 
 ```sh
-curl -fsSLO hhttps://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh
+curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh
 bash gentoo-install.sh
 ```
 
@@ -260,14 +269,14 @@ These are the choices the installer makes on your behalf, with what they cost.
 
 ## Limitations
 
-- **Untested on real hardware** at this version (see [Status](#gentoo-installer)).
+- **Mostly untested.** Only the combination in [Tested combinations](#tested-combinations) has been installed end to end so far, on a virtual machine.
 - **Secure Boot is not supported.** Nothing is signed. Disable Secure Boot in the firmware, or set up signing yourself afterwards (Gentoo wiki: *Secure Boot*).
 - **amd64 only.** 32-bit UEFI firmware is refused; boot the live image in BIOS/CSM mode on such machines.
 - **No LVM, RAID, ZFS or multi-disk root,** and no separate `/home` partition (Btrfs gets an `@home` subvolume).
 - **No hibernation** setup, with any swap choice.
 - **Encryption scope.** LUKS2 covers the root filesystem. With GRUB, `/boot` is a separate unencrypted partition; with systemd-boot, kernels sit on the unencrypted EFI partition. Either way the kernel and initramfs are readable and could be tampered with by someone with physical access. There is no TPM unlock or keyfile support. The boot-time passphrase prompt may use the US layout, so the installer advises a passphrase that types the same on US and your layout.
 - **Hyprland is not offered.** The Gentoo wiki currently recommends installing it from a dedicated overlay; add it after installing.
-- **Older NVIDIA cards.** Newer NVIDIA driver branches are dropping older GPUs (the GTX 10 series and earlier are affected). On such a card you may need to mask newer `nvidia-drivers` or use Nouveau.
+- **Older NVIDIA cards.** `nvidia-drivers` 595 and newer only support Turing (GeForce GTX 16xx / RTX 20xx) and newer cards. For Maxwell, Pascal and Volta cards (GTX 750, 900 and 10xx series, Titan V), the installer and `gentoo-helper` keep the driver on the 580 branch, the last one that supports them, by masking `>=x11-drivers/nvidia-drivers-581`. Kepler and older cards get the open source Nouveau driver, because NVIDIA no longer supports them and Gentoo masks their old driver branches. The card generation is decided from its PCI device ID, which is a heuristic; `nvidia-drivers` checks the card again when it is installed and warns if a different branch is needed.
 - **GNOME on OpenRC** works through elogind, but GNOME is developed against systemd, and some settings panels may be limited. The installer recommends systemd when you pick GNOME.
 - **dhcpcd and systemd-networkd options configure wired networking only.** Pick NetworkManager for Wi-Fi.
 - **Built-in timezone list.** The minimal ISO ships an empty `/usr/share/zoneinfo`, so the installer carries its own list of timezone names (tzdata 2026a) for browsing and checking. A zone added to tzdata later is not in it; you can still type it and confirm, and the new system's own timezone database checks it during installation (falling back to UTC with a warning if it does not exist). On the LiveGUI, which has a full database, that is used instead.
@@ -312,6 +321,7 @@ gentoo-helper clean            remove unneeded packages, free disk space
 gentoo-helper news             read Gentoo news
 gentoo-helper configs          review configuration file updates
 gentoo-helper flatpak          Flatpak apps
+gentoo-helper tasks            common tasks: printing, Wi-Fi, drivers, codecs, SSH, ...
 ```
 
 The installer puts it in `/usr/local/bin/gentoo-helper`. On a system installed before it existed, or installed another way:
@@ -330,10 +340,22 @@ What it does:
 - **Settings Portage asks for.** When a package needs a USE flag, a licence or a testing version allowed first, the helper explains the change and offers to save it. These are saved only in files named `zz-gentoo-helper` under `/etc/portage/`, which you can review, edit or remove from the Maintenance menu. Testing (`~amd64`) versions default to *no*. Masked packages are never unmasked.
 - **Remove.** Lists the packages you chose to install, removes one only if nothing else needs it, and warns loudly before removing anything that looks essential (kernel, bootloader, drivers, network, login screen, desktop).
 - **Maintenance.** Remove unneeded packages, free disk space (old downloads and failed-build leftovers), remove old kernels (keeping the 3 newest), review configuration updates, read news, rebuild after library or Perl upgrades, and view or undo the settings it saved.
+- **Common tasks.** Guided setup for common hardware and features. Each task shows what it found (hardware present, packages installed, services running), lets you tick what to install, then enables the right services (OpenRC or systemd), adds your user to the groups the feature needs, and says what to do next:
+  - *Printing:* CUPS, network printer discovery (Avahi), Gutenprint and HP drivers, KDE's printer settings page.
+  - *Scanners:* SANE, driverless scanning (sane-airscan), a scanning app, HP scanner drivers.
+  - *Wi-Fi:* lists the adapters and the driver each one uses, installs firmware, the regulatory database and NetworkManager (offering to switch over from dhcpcd or systemd-networkd), unblocks a soft-blocked radio, and offers the proprietary Broadcom driver when a Broadcom card is present.
+  - *Bluetooth:* BlueZ, the right settings panel or applet for your desktop, and rebuilds PipeWire with Bluetooth support for headphones and speakers when needed.
+  - *Graphics drivers:* shows each GPU and its driver in use. For NVIDIA it installs the proprietary driver, adds it to `VIDEO_CARDS` (backing up `make.conf`), makes sure kernel mode setting is on, and rebuilds the initramfs. For Maxwell, Pascal and Volta cards it keeps the driver on the 580 branch; for Kepler and older it explains why Nouveau stays (see [Limitations](#limitations)). For Intel it offers the video decoding drivers. AMD needs nothing extra.
+  - *Audio and video codecs:* FFmpeg and the GStreamer codec plugins; DVD decryption as an opt-in.
+  - *SSH server:* installs and starts it, shows the address to connect to, opens the firewall if one is on, and can switch it off again.
+  - *Firewall:* ufw that blocks unsolicited incoming connections and keeps SSH reachable if the server runs.
+  - *Fonts, archive formats, virtual machines (virt-manager with QEMU/KVM), Steam (as a Flatpak).*
 - **Flatpak.** Search Flathub, install, remove and update apps, and remove unused runtimes.
 - **When something fails,** it saves a plain report of the actual error from the package's build log in `/var/log/gentoo-helper-last-failure.txt`. Everything it runs is logged to `/var/log/gentoo-helper.log`.
 
 Configuration updates, in more detail: Portage only holds back a new configuration file when the current one was changed (by you or by the installer). The helper shows the differences and lets you keep yours, take the new one (your old file is kept as a `.bak-` copy), or decide later. For files the installer customised, it recommends keeping yours.
+
+Common tasks change system settings, so they each say exactly what they will change before doing it. The riskiest is the NVIDIA driver, because a wrong driver branch can leave the screen black. The helper picks the branch from the card's generation, and explains how to recover if the screen stays black anyway.
 
 Limitations: it covers everyday tasks, not everything Portage can do. It does not edit USE flags for you except when Portage asks for a change, and it does not manage overlays. Portage builds use `--quiet-build`, so compiler output goes to the build logs rather than the screen. It was tested against simulated Portage output and the real `dialog` program; report anything that looks wrong.
 
@@ -383,3 +405,7 @@ To change anything, edit `src/`, then:
 ```
 
 Commit the rebuilt installers together with the `src/` change. `--check` is meant for a CI job, so a pull request cannot change `src/` without rebuilding. The one ShellCheck exception is documented in `build.sh`: the menu version replaces the console prompt functions with wrappers, and ShellCheck cannot see that the originals are still called through copies made at load time.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

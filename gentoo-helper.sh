@@ -28,7 +28,7 @@
 
 set -uo pipefail
 
-readonly VERSION="1.0.0"
+readonly VERSION="1.1.0"
 readonly LOG="/var/log/gentoo-helper.log"
 readonly STATE_DIR="/var/lib/gentoo-helper"
 readonly LAST_FAILURE="/var/log/gentoo-helper-last-failure.txt"
@@ -37,6 +37,7 @@ readonly WORLD_FILE="/var/lib/portage/world"
 readonly USE_FILE="/etc/portage/package.use/zz-gentoo-helper"
 readonly LICENSE_FILE="/etc/portage/package.license/zz-gentoo-helper"
 readonly KEYWORDS_FILE="/etc/portage/package.accept_keywords/zz-gentoo-helper"
+readonly MASK_FILE="/etc/portage/package.mask/zz-gentoo-helper"
 readonly FLATHUB_URL="https://dl.flathub.org/repo/flathub.flatpakrepo"
 
 # Real runs: compiler output goes to each package's build log instead of the
@@ -1160,13 +1161,13 @@ settings_flow() {
         {
             echo "Settings this helper saved when Portage asked for them. They live in"
             echo "their own files, so your other settings are never touched."
-            for file in "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE"; do
+            for file in "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"; do
                 echo
                 echo "== ${file}"
                 if [[ -s $file ]]; then cat "$file"; else echo "(none)"; fi
             done
         } >"$f"
-        if ! ui_menu "Package options (USE flags), accepted licences and allowed testing versions saved by this helper." "view" \
+        if ! ui_menu "Package options (USE flags), accepted licences, allowed testing versions and blocked versions saved by this helper." "view" \
             view "Show them" \
             edit "Edit them (nano text editor)" \
             clear "Remove all of them" \
@@ -1177,7 +1178,7 @@ settings_flow() {
             view) ui_file "$f" ;;
             edit)
                 local -a existing=()
-                for file in "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE"; do
+                for file in "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"; do
                     if [[ -f $file ]]; then existing+=("$file"); fi
                 done
                 if (( ${#existing[@]} == 0 )); then ui_msg "There are none yet."; continue; fi
@@ -1186,7 +1187,7 @@ settings_flow() {
                 ;;
             clear)
                 if ui_yesno "Remove all settings saved by this helper? Packages that needed them may fail to update until the settings are added again (the helper offers that automatically)." n; then
-                    rm -f "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE"
+                    rm -f "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"
                     log "Removed all helper settings"
                     ui_msg "Removed. The next system update rebuilds whatever is affected."
                 fi
@@ -1289,7 +1290,8 @@ flatpak_install() {
     while IFS= read -r line; do
         [[ -n $line ]] || continue
         if [[ $line == *$'\t'* ]]; then
-            IFS=$'\t' read -r id name desc <<<"$line"
+            # A non-whitespace separator keeps empty columns in place.
+            IFS=$'\x1f' read -r id name desc <<<"${line//$'\t'/$'\x1f'}"
         else
             read -r id name desc <<<"$line"
         fi
@@ -1319,10 +1321,10 @@ flatpak_remove() {
     local id name line
     local -a items=()
     TITLE="Remove a Flatpak app"
-    while IFS=$'\t' read -r id name; do
+    while IFS=$'\x1f' read -r id name; do
         [[ -n $id ]] || continue
         items+=("$id" "${name:-$id}  (${id})")
-    done < <(flatpak list --app --columns=application,name 2>/dev/null)
+    done < <(flatpak list --app --columns=application,name 2>/dev/null | tr '\t' '\037')
     if (( ${#items[@]} == 0 )); then ui_msg "No Flatpak apps are installed."; return 0; fi
     if ! ui_menu "Which Flatpak app should be removed?" "" "${items[@]}"; then return 0; fi
     if ui_yesno "Remove ${CHOICE}?" y; then
@@ -1635,7 +1637,7 @@ task_wifi() {
     items+=(net-wireless/iw "iw, a Wi-Fi diagnostics tool" off)
     wlan_pci=$(pci_devices "0x0280")
     if [[ $wlan_pci == *"|0x14e4|"* ]]; then
-        items+=(net-wireless/broadcom-sta "Broadcom 'wl' driver (proprietary; only for Broadcom cards the open drivers do not support)" off)
+        items+=(net-wireless/broadcom-sta "Broadcom 'wl' driver (proprietary, testing version; only for cards the open drivers do not support)" off)
     fi
     if ! ui_checklist "${text}"$'\n\n'"Choose what to install:" "${items[@]}"; then return 0; fi
     sel=$CHOICE
@@ -1751,7 +1753,7 @@ task_graphics() {
                 local -a pkgs=()
                 if ui_checklist "Intel video decoding drivers (VA-API):" \
                     media-libs/libva-intel-media-driver "Intel graphics from 2014 (Broadwell) and newer" on \
-                    x11-libs/libva-intel-driver "Older Intel graphics (before 2014)" off \
+                    media-libs/libva-intel-driver "Older Intel graphics (before 2014)" off \
                     media-video/libva-utils "vainfo, to check that it works" on; then
                     sel=$CHOICE
                     read -ra pkgs <<<"$sel"
@@ -1778,23 +1780,66 @@ task_graphics() {
     done
 }
 
+# nvidia_generation DEVICE_ID (hex, as in /sys/bus/pci/devices/*/device):
+#   current      Turing (GeForce GTX 16xx, RTX 20xx) and newer
+#   legacy580    Maxwell, Pascal, Volta (GTX 750, 900 and 10xx series, Titan V):
+#                the 580 driver branch is the last to support them, because
+#                nvidia-drivers 595 and newer only ship the open kernel modules
+#   unsupported  Kepler and older: no longer supported by NVIDIA; Gentoo masks
+#                the old driver branches
+# Decided by PCI device ID ranges (Maxwell starts at 0x1340, Turing at 0x1e00).
+# It is a heuristic; nvidia-drivers itself checks the card again when installed.
+nvidia_generation() {
+    local id
+    if [[ ! $1 =~ ^0x[0-9a-fA-F]+$ ]]; then echo "current"; return 0; fi
+    id=$(( $1 ))
+    if (( id >= 0x1e00 )); then echo "current"
+    elif (( id >= 0x1340 )); then echo "legacy580"
+    else echo "unsupported"; fi
+}
+
+# The generation of the oldest NVIDIA graphics card in this computer (empty if none).
+nvidia_gen_here() {
+    local d gen result=""
+    for d in /sys/bus/pci/devices/*; do
+        [[ -r $d/vendor && -r $d/class ]] || continue
+        [[ $(<"$d/vendor") == "0x10de" && $(<"$d/class") == 0x03* ]] || continue
+        gen=$(nvidia_generation "$(cat "$d/device" 2>/dev/null)")
+        case "${result}:${gen}" in
+            :*|current:legacy580|current:unsupported|legacy580:unsupported) result=$gen ;;
+        esac
+    done
+    printf '%s' "$result"
+}
+
 task_nvidia() {
-    local kpkg note=""
+    local kpkg note="" gen branch_text=""
     TITLE="NVIDIA driver"
     if pkg_installed x11-drivers/nvidia-drivers; then
         ui_msg "The NVIDIA proprietary driver is already installed. It is updated with the regular system update, and rebuilt automatically when the kernel changes."
         return 0
     fi
-    if ! ui_yesno "This installs NVIDIA's proprietary driver:"$'\n\n'"1. Installs x11-drivers/nvidia-drivers (you will be asked to accept NVIDIA's licence)."$'\n'"2. Adds 'nvidia' to VIDEO_CARDS in /etc/portage/make.conf (a backup is kept)."$'\n'"3. Turns on kernel mode setting for it (needed for Wayland desktops) in /etc/modprobe.d/."$'\n'"4. Rebuilds the initramfs so the open-source nouveau driver no longer loads first."$'\n\n'"Current driver branches support GeForce GTX 16xx, RTX and newer best. For GTX 10xx and older cards, check the Gentoo wiki page 'NVIDIA/nvidia-drivers' first: newer branches are dropping older cards."$'\n\n'"A restart is needed afterwards. Continue?" y; then
+    gen=$(nvidia_gen_here)
+    if [[ $gen == "unsupported" ]]; then
+        ui_msg "This NVIDIA card is from the Kepler generation or older (such as most GeForce GTX 600 and 700 series cards). NVIDIA no longer supports it in its proprietary driver, and Gentoo masks the old driver branches because they no longer get security fixes."$'\n\n'"Keep using the open source Nouveau driver, which is already part of the system. 3D performance is lower, but it is maintained."
         return 0
+    fi
+    if [[ $gen == "legacy580" ]]; then
+        branch_text=$'\n\n'"This card is from the Maxwell, Pascal or Volta generation (for example GeForce GTX 750, 900 or 10xx series). NVIDIA drivers 595 and newer no longer support it, so the helper keeps the driver on the 580 branch, the last one that does, by adding '>=x11-drivers/nvidia-drivers-581' to ${MASK_FILE}."
+    fi
+    if ! ui_yesno "This installs NVIDIA's proprietary driver:"$'\n\n'"1. Installs x11-drivers/nvidia-drivers (if your licence settings require it, you are asked to accept NVIDIA's licence)."$'\n'"2. Adds 'nvidia' to VIDEO_CARDS in /etc/portage/make.conf (a backup is kept)."$'\n'"3. Makes sure kernel mode setting is on (current drivers enable it by default; it matters for older branches and for Wayland)."$'\n'"4. Rebuilds the initramfs so the open-source nouveau driver no longer loads first.${branch_text}"$'\n\n'"A restart is needed afterwards. Continue?" y; then
+        return 0
+    fi
+    if [[ $gen == "legacy580" ]]; then
+        add_settings "$MASK_FILE" ">=x11-drivers/nvidia-drivers-581" "NVIDIA card supported up to the 580 driver branch"
     fi
     install_packages "Install the NVIDIA driver" x11-drivers/nvidia-drivers || return 0
     add_video_card nvidia || note+=$'\n'"Could not update VIDEO_CARDS in /etc/portage/make.conf."
     if ! grep -rqsE "nvidia[-_]drm.*modeset=1" /etc/modprobe.d/ && [[ " $(cat /proc/cmdline) " != *"nvidia_drm.modeset=1"* && " $(cat /proc/cmdline) " != *"nvidia-drm.modeset=1"* ]]; then
-        if mkdir -p /etc/modprobe.d && printf '# Added by gentoo-helper: kernel mode setting for the NVIDIA driver (needed for Wayland)\noptions nvidia_drm modeset=1\n' >/etc/modprobe.d/nvidia-drm-modeset.conf; then
+        if mkdir -p /etc/modprobe.d && printf '# Added by gentoo-helper: kernel mode setting for the NVIDIA driver\n# (default in current drivers; needed for older branches and Wayland)\noptions nvidia_drm modeset=1\n' >/etc/modprobe.d/nvidia-drm-modeset.conf; then
             log "Wrote /etc/modprobe.d/nvidia-drm-modeset.conf"
         else
-            note+=$'\n'"Could not write /etc/modprobe.d/nvidia-drm-modeset.conf (needed for Wayland desktops)."
+            note+=$'\n'"Could not write /etc/modprobe.d/nvidia-drm-modeset.conf."
         fi
     fi
     if kpkg=$(kernel_package); then
