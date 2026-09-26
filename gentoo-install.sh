@@ -197,17 +197,20 @@ show_build_log_excerpt() {
     blog=${blog#*located at \'}
     blog=${blog%\'}
     if [[ -z $blog || ! -r $blog ]]; then return 0; fi
-    errors=$(grep -nE "error:|Error [0-9]+|No such file or directory|Illegal instruction|Segmentation fault|Killed|undefined reference|command not found|can't get .--help' info" "$blog" 2>/dev/null \
+    local pattern="\\*\\*\\* \\[|error:|Error [0-9]+|Can't locate|No such file or directory|Illegal instruction|Segmentation fault|Killed|undefined reference|command not found|can't get .--help' info"
+    errors=$(grep -nE "$pattern" "$blog" 2>/dev/null \
         | grep -vE "^[0-9]+:(checking|configure:)|-Werror|-Wno-error" || true)
+    local first=${errors%%:*} from
     {
         echo
         echo "---- Why it failed: lines from the package's build log ----"
         echo "Build log: ${blog}"
         echo "(from the live system: ${MNT}${blog})"
-        if [[ -n $errors ]]; then
+        if [[ $first =~ ^[0-9]+$ ]]; then
+            from=$(( first > 12 ? first - 12 : 1 ))
             echo
-            echo "First error lines:"
-            head -n 12 <<<"$errors"
+            echo "Where it first went wrong (lines ${from}-$(( first + 3 )); the cause is usually just above the first '***' or 'error' line):"
+            sed -n "${from},$(( first + 3 ))p" "$blog"
         fi
         echo
         echo "Last lines of the build log:"
