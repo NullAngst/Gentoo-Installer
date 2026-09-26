@@ -214,14 +214,29 @@ show_build_log_excerpt() {
         tail -n 25 "$blog"
         echo
         if [[ -z $errors && -n $(tail -c 1 "$blog") ]]; then
-            echo "The build log stops in the middle of a line without any error message."
-            echo "That usually means nothing more could be written: the disk is full,"
-            echo "or the filesystem was switched to read-only after a disk error."
+            echo "The build log stops in the middle of a line without any error message:"
+            echo "the build lost its output channel before it could report anything."
+            echo "Possible causes: Portage could not write the build output to the screen,"
+            echo "the disk is full, or the filesystem became read-only (free space below)."
         fi
         echo "Free space on the new system's root filesystem:"
         df -h / 2>/dev/null | sed 's/^/    /' || true
         echo "------------------------------------------------------------"
     } | tee -a "$LOG"
+}
+
+# Put standard input/output back into blocking mode. A terminal left in
+# non-blocking mode makes large bursts of output fail with "Resource temporarily
+# unavailable", which can abort a running build. Harmless when already blocking.
+ensure_blocking_stdio() {
+    if have python3; then
+        python3 -c 'import os
+for fd in (0, 1, 2):
+    try:
+        os.set_blocking(fd, True)
+    except OSError:
+        pass' 2>/dev/null || true
+    fi
 }
 
 # Free KiB on the filesystem holding PATH (empty if unknown).
@@ -2521,8 +2536,14 @@ step_header() {
     if (( $# > 0 )); then say "$@"; fi
 }
 
+# Compiler output goes only to each package's build log (--quiet-build), not to
+# the screen. Streaming thousands of long compiler lines to a slow console can
+# make Portage abort a build mid-way; the build log keeps everything, and the
+# relevant part is shown automatically when a build fails.
+EMERGE_OPTS=(--verbose --quiet-build=y)
+
 emerge_pkgs() {
-    run emerge --verbose --noreplace "$@"
+    run emerge "${EMERGE_OPTS[@]}" --noreplace "$@"
 }
 
 # emerge_optional "label" PKG...: failures are recorded but do not stop the install.
@@ -2530,11 +2551,11 @@ emerge_optional() {
     local label=$1
     shift
     if (( $# == 0 )); then return 0; fi
-    if run emerge --verbose --noreplace "$@"; then return 0; fi
+    if run emerge "${EMERGE_OPTS[@]}" --noreplace "$@"; then return 0; fi
     warn "Installing ${label} in one go failed. Trying the packages one at a time."
     local p
     for p in "$@"; do
-        if ! run emerge --verbose --noreplace "$p"; then
+        if ! run emerge "${EMERGE_OPTS[@]}" --noreplace "$p"; then
             warn "Could not install ${p}; skipping it. Details are in ${LOG}."
             echo "$p" >>"$FAILED_PATH"
         fi
@@ -2649,7 +2670,7 @@ c_cpuflags() {
     fi
     step_header "Detect this CPU's instruction set flags" \
         "cpuid2cpuflags asks the CPU which instruction set extensions it supports. The result is saved as CPU_FLAGS_X86 so packages can use them."
-    run emerge --verbose --oneshot --noreplace app-portage/cpuid2cpuflags
+    run emerge "${EMERGE_OPTS[@]}" --oneshot --noreplace app-portage/cpuid2cpuflags
     local flags
     flags=$(cpuid2cpuflags)
     mkdir -p /etc/portage/package.use
@@ -2692,7 +2713,7 @@ c_locale_time() {
 c_world() {
     step_header "Update the base system" \
         "emerge now brings every installed package in line with the selected profile, USE flags and compiler settings (emerge --update --deep --newuse @world). With binary packages much of this is downloading; anything without a matching binary is compiled. This can take from a few minutes to over an hour."
-    run emerge --verbose --update --deep --newuse @world
+    run emerge "${EMERGE_OPTS[@]}" --update --deep --newuse @world
     info "Deleting the downloaded binary packages (already installed; they only take up space)."
     free_package_caches
 }
@@ -2805,9 +2826,9 @@ c_bootloader_prep() {
         step_header "Install the systemd-boot bootloader" \
             "systemd-boot is installed to the EFI system partition first, so the kernel step can add its boot entries automatically."
         if [[ $INIT == "openrc" ]]; then
-            run emerge --verbose --oneshot --update --newuse sys-apps/systemd-utils
+            run emerge "${EMERGE_OPTS[@]}" --oneshot --update --newuse sys-apps/systemd-utils
         else
-            run emerge --verbose --oneshot --update --newuse sys-apps/systemd
+            run emerge "${EMERGE_OPTS[@]}" --oneshot --update --newuse sys-apps/systemd
         fi
         if ! run bootctl install; then
             warn "bootctl could not update the firmware boot menu; installing without it (the fallback path still works)."
@@ -3381,6 +3402,7 @@ chroot_stage() {
     load_config "$CONF_PATH"
     touch "$PROGRESS_PATH"
     log "chroot stage started"
+    info "While packages build, their compiler output goes to Portage's build logs instead of the screen; you will see one line per package. If a build fails, the relevant part of its log is shown."
     local total=${#CHROOT_STEPS[@]} i=0 s
     for s in "${CHROOT_STEPS[@]}"; do
         i=$(( i + 1 ))
@@ -3390,6 +3412,7 @@ chroot_stage() {
             continue
         fi
         check_disk_space "$s"
+        ensure_blocking_stdio
         "$s"
         echo "$s" >>"$PROGRESS_PATH"
         ok "Step ${CURRENT_STEP} finished."
