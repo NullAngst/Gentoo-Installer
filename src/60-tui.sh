@@ -631,7 +631,7 @@ tui_sec_summary() {
         region) echo "${NEW_HOSTNAME}, ${TIMEZONE}, ${LOCALE}" ;;
         acct)
             if [[ ${SEC_STATE[acct]:-} != "set" ]]; then echo "not set yet"; return 0; fi
-            echo "${USERNAME} (${PRIV_TOOL})" ;;
+            echo "${USERNAME} (${PRIV_TOOL}, shell: ${USER_SHELL:-bash})" ;;
         hw) echo "network: ${NET_TOOL}, graphics: ${GPU_DRIVER}, SSH: ${WANT_SSH}" ;;
         sw)
             for a in $FLATPAK_APPS; do n_fp=$(( n_fp + 1 )); done

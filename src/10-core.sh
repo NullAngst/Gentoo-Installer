@@ -39,7 +39,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.3.0"
 readonly MNT="/mnt/gentoo"
 readonly LIVE_LOG="/tmp/gentoo-install.log"
 readonly LIVE_CONF_COPY="/tmp/gentoo-install.conf"
@@ -79,7 +79,7 @@ CONFIG_VARS=(
     NET_TOOL WANT_BT WANT_CUPS WANT_SSH WANT_FLATPAK FLATPAK_APPS EXTRA_PKGS
     CPU_VENDOR CPU_MODEL NPROC RAM_GIB IS_LAPTOP HAS_WIFI HAS_BT VIRT SECURE_BOOT
     HAS_NVIDIA HAS_AMD HAS_INTEL GPU_VM GPU_DRIVER VIDEO_CARDS NVIDIA_GEN
-    IS_APPLE MAC_MODEL LIVE_BOOT_MODE
+    IS_APPLE MAC_MODEL LIVE_BOOT_MODE USER_SHELL
     PROFILE_SUFFIX STAGE3_VARIANT MAKE_JOBS EMERGE_JOBS
     KERNEL_CMDLINE GRUB_EXTRA_CMDLINE DIST_BASE GENTOO_MIRRORS_VALUE
 )
@@ -93,12 +93,43 @@ init_defaults() {
     KEYMAP="us"
     XKB_LAYOUT="us"
     GPU_DRIVER="mesa"
+    USER_SHELL="bash"
     ROOT_PASSWORD=""
     USER_PASSWORD=""
     LUKS_PASSWORD=""
     STAGE3_URL=""
     STAGE3_FILE=""
 }
+
+# Login shells offered for the user account. These are the interactive login
+# shells in Gentoo's app-shells category with a stable amd64 version.
+# Fields: choice|packages (space separated)|command name|menu label
+SHELL_CATALOG=(
+    "bash|app-shells/bash|bash|bash (Gentoo's default, recommended)"
+    "zsh|app-shells/zsh app-shells/gentoo-zsh-completions|zsh|zsh (bash-like, more interactive features)"
+    "fish|app-shells/fish|fish|fish (friendly, good defaults; not POSIX)"
+    "nushell|app-shells/nushell|nu|Nushell (structured data; not POSIX)"
+    "dash|app-shells/dash|dash|sh: dash (minimal POSIX sh)"
+    "ksh|app-shells/ksh|ksh|ksh (AT&T Korn shell)"
+    "mksh|app-shells/mksh|mksh|mksh (MirBSD Korn shell)"
+    "loksh|app-shells/loksh|ksh|loksh (OpenBSD Korn shell)"
+    "yash|app-shells/yash|yash|yash (strict POSIX, with line editing)"
+    "tcsh|app-shells/tcsh|tcsh|tcsh (C shell syntax)"
+)
+
+# shell_field CHOICE N: field N (1-4) of a SHELL_CATALOG entry.
+shell_field() {
+    local entry
+    for entry in "${SHELL_CATALOG[@]}"; do
+        if [[ ${entry%%|*} == "$1" ]]; then
+            cut -d'|' -f"$2" <<<"$entry"
+            return 0
+        fi
+    done
+    return 1
+}
+
+valid_shell_choice() { shell_field "$1" 1 >/dev/null; }
 
 # ----------------------------------------------------------------------------
 # Output helpers

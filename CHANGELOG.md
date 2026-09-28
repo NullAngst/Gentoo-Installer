@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0 (2026-09-28)
+
+### Added
+- Login shell choice for the user account (Part 4, Accounts): bash, zsh, fish, Nushell, dash (sh), ksh, mksh, loksh, yash or tcsh, the interactive login shells in Gentoo's `app-shells` with a stable amd64 version. root keeps bash and `/bin/sh` is unchanged. The shell is installed as an optional package; if it fails, the user keeps bash and the failure is reported. Its path is added to `/etc/shells` when missing (Nushell is not listed by default). zsh gets a starter `~/.zshrc`, which also avoids its first-run wizard.
+- The post-install notes have a Login shell section.
+
+### Changed
+- Sway's start-on-tty1 snippet is written to the login file of the user's actual shell, in that shell's syntax (sh-family, fish or tcsh), instead of always `~/.bash_profile`. Tested in bash, zsh, dash, ksh, mksh, yash, fish and tcsh. With Nushell there is no autostart.
+- README: tested combinations merged into one table with the two runs from 2026-09-26 (those rows were dropped by the 1.2.0 README); new Login shells section; files table lists the NVIDIA package mask and the shell files.
+
 ## 1.2.0 (2026-09-28)
 
 ### Fixed

@@ -450,6 +450,25 @@ q_accounts() {
     ask USERNAME "Username (lowercase)" "${USERNAME:-}" valid_username
     ask_password USER_PASSWORD "password for ${USERNAME}" 1
 
+    local entry
+    local -a shell_items=()
+    for entry in "${SHELL_CATALOG[@]}"; do
+        shell_items+=("${entry%%|*}|${entry##*|}")
+    done
+    say "The login shell is the command-line shell ${USERNAME} gets in a terminal and on the text console. bash is Gentoo's default and what nearly every guide assumes. Any other choice is installed alongside it: root keeps bash, so recovery always works, and system scripts are unaffected because /bin/sh stays bash."
+    valid_shell_choice "${USER_SHELL:-}" || USER_SHELL="bash"
+    choose USER_SHELL "Login shell for ${USERNAME}" "$USER_SHELL" "${shell_items[@]}"
+    case "$USER_SHELL" in
+        fish|nushell)
+            say "$(shell_field "$USER_SHELL" 4 | cut -d' ' -f1) is not a POSIX shell: commands copied from guides sometimes need changes. It also does not read /etc/profile, so environment settings that Gentoo packages add there (for example extra PATH entries) are missing in its login sessions unless you add them to its own configuration. It is written in Rust and is compiled from source if no binary package is available, which can take a while."
+            if [[ $USER_SHELL == "nushell" && $DE == "sway" ]]; then
+                say "Sway is not started automatically after login with Nushell. Type 'sway' after logging in on the first console."
+            fi
+            ;;
+        tcsh) say "tcsh uses C shell syntax, which differs from the sh-style commands in most guides and scripts." ;;
+        dash) say "dash is a minimal POSIX sh. It is fast, but has no command history or line editing, so it is awkward as an everyday interactive shell." ;;
+    esac
+
     say "sudo is the standard tool for running a command as administrator. doas is a much smaller alternative from OpenBSD. Either way, your user is added to the 'wheel' group, which is allowed to use it."
     choose PRIV_TOOL "Administrator tool" "${PRIV_TOOL:-sudo}" \
         "sudo|sudo (standard, recommended)" \
@@ -736,7 +755,7 @@ print_summary() {
     summary_row "Locale:" "$LOCALE"
     summary_row "Console keymap:" "$KEYMAP"
     if [[ $DE != "none" ]]; then summary_row "Desktop keyboard:" "${XKB_LAYOUT}${XKB_VARIANT:+ (${XKB_VARIANT})}"; fi
-    summary_row "User:" "$USERNAME (admin tool: ${PRIV_TOOL})"
+    summary_row "User:" "$USERNAME (admin tool: ${PRIV_TOOL}, shell: ${USER_SHELL:-bash})"
     echo
     summary_row "Network:" "$NET_TOOL"
     summary_row "Graphics driver:" "$( [[ $HAS_NVIDIA == yes ]] && echo "${GPU_DRIVER}$( [[ $GPU_DRIVER == nvidia && $NVIDIA_GEN == legacy580 ]] && echo " (580 branch)" )" || echo "Mesa (open source)" )"

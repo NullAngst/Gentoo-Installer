@@ -25,6 +25,91 @@ emerge_pkgs() {
     run emerge "${EMERGE_OPTS[@]}" --noreplace "$@"
 }
 
+# Install the chosen login shell and make it the user's shell. If it cannot be
+# installed, the user keeps bash and the failure is listed at the end.
+set_user_shell() {
+    local want=${USER_SHELL:-bash} cmd path home="/home/${USERNAME}"
+    local -a pkgs=()
+    if [[ $want == "bash" ]] || ! valid_shell_choice "$want"; then return 0; fi
+    read -ra pkgs <<<"$(shell_field "$want" 2)"
+    cmd=$(shell_field "$want" 3)
+    info "Installing the ${want} shell for ${USERNAME}."
+    emerge_optional "the ${want} shell" "${pkgs[@]}"
+    path=$(command -v "$cmd" 2>/dev/null || true)
+    if [[ -z $path || ! -x $path ]]; then
+        warn "The ${want} shell is not available, so ${USERNAME} keeps bash. Change it later with: chsh -s <path to the shell>"
+        return 0
+    fi
+    # Login screens and chsh only accept shells listed in /etc/shells.
+    if ! grep -qxF "$path" /etc/shells 2>/dev/null; then
+        echo "$path" >>/etc/shells
+    fi
+    run usermod -s "$path" "$USERNAME"
+    ok "Login shell for ${USERNAME}: ${path}"
+    if [[ $want == "zsh" && ! -e $home/.zshrc ]]; then
+        # Without a ~/.zshrc, zsh starts an interactive setup wizard on first use.
+        printf '%s\n' "# Starter configuration written by gentoo-install.sh. Edit freely." \
+            "HISTFILE=~/.zsh_history" "HISTSIZE=10000" "SAVEHIST=10000" \
+            "setopt appendhistory sharehistory histignoredups" \
+            "bindkey -e" \
+            "autoload -Uz compinit && compinit" \
+            "zstyle ':completion:*' menu select" \
+            "autoload -Uz promptinit && promptinit" \
+            "prompt gentoo" >"$home/.zshrc"
+        chown "${USERNAME}:${USERNAME}" "$home/.zshrc"
+        ok "Wrote a starter ~/.zshrc for ${USERNAME}."
+    fi
+}
+
+# The file a login shell reads at login, and its syntax, for the shell USERNAME
+# actually has (the chosen one may have failed to install). Prints
+# "syntax file-relative-to-home", or nothing if autostart is not supported.
+login_file_for_user() {
+    local sh
+    sh=$(getent passwd "$USERNAME" | cut -d: -f7)
+    case "${sh##*/}" in
+        bash) echo "sh .bash_profile" ;;
+        zsh) echo "sh .zprofile" ;;
+        yash) echo "sh .yash_profile" ;;
+        dash|ksh|mksh|sh) echo "sh .profile" ;;
+        fish) echo "fish .config/fish/conf.d/sway-autostart.fish" ;;
+        tcsh|csh) echo "csh .login" ;;
+        *) ;;
+    esac
+}
+
+# write_sway_autostart HOME FLAG: start Sway after logging in on tty1.
+write_sway_autostart() {
+    local home=$1 flag=$2 syntax="" file="" target
+    read -r syntax file <<<"$(login_file_for_user)"
+    if [[ -z $file ]]; then
+        warn "Sway is not started automatically for this login shell. Type 'sway' after logging in on the first console."
+        return 0
+    fi
+    target="$home/$file"
+    if grep -q "exec sway" "$target" 2>/dev/null; then return 0; fi
+    mkdir -p "$(dirname "$target")"
+    case "$syntax" in
+        sh)
+            printf '%s\n' "" "# Start Sway after logging in on the first console (tty1)." \
+                "# Added by gentoo-install.sh. Delete these lines to turn it off." \
+                "if [ -z \"\${WAYLAND_DISPLAY:-}\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]; then" \
+                "    exec sway${flag}" "fi" >>"$target" ;;
+        fish)
+            printf '%s\n' "# Start Sway after logging in on the first console (tty1)." \
+                "# Added by gentoo-install.sh. Delete this file to turn it off." \
+                "if status is-login; and test -z \"\$WAYLAND_DISPLAY\"; and test (tty) = /dev/tty1" \
+                "    exec sway${flag}" "end" >"$target" ;;
+        csh)
+            printf '%s\n' "" "# Start Sway after logging in on the first console (tty1)." \
+                "# Added by gentoo-install.sh. Delete these lines to turn it off." \
+                "if ( ! \$?WAYLAND_DISPLAY ) then" \
+                "    if ( \"\`tty\`\" == \"/dev/tty1\" ) exec sway${flag}" "endif" >>"$target" ;;
+    esac
+    chown -R "${USERNAME}:${USERNAME}" "$home/${file%%/*}"
+    ok "Sway starts after logging in on tty1 (set up in ~/${file})."
+}
+
 # emerge_optional "label" PKG...: failures are recorded but do not stop the install.
 emerge_optional() {
     local label=$1
@@ -381,6 +466,7 @@ c_users() {
     fi
     usermod -p "$USER_HASH" "$USERNAME"
     ok "User ${USERNAME} created and password set."
+    set_user_shell
 
     if [[ $PRIV_TOOL == "sudo" ]]; then
         mkdir -p /etc/sudoers.d
@@ -708,16 +794,9 @@ setup_user_desktop() {
                     fi
                 } >>"$cfg"
             fi
-            if [[ $SWAY_AUTOSTART == "yes" ]] && ! grep -q "exec sway" "$home/.bash_profile" 2>/dev/null; then
+            if [[ $SWAY_AUTOSTART == "yes" ]]; then
                 if [[ $GPU_DRIVER == "nvidia" ]]; then flag=" --unsupported-gpu"; fi
-                {
-                    echo ""
-                    echo "# Start Sway after logging in on the first console (tty1)."
-                    echo "# Added by gentoo-install.sh. Delete these lines to turn it off."
-                    echo "if [ -z \"\${WAYLAND_DISPLAY:-}\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]; then"
-                    echo "    exec sway${flag}"
-                    echo "fi"
-                } >>"$home/.bash_profile"
+                write_sway_autostart "$home" "$flag"
             fi
             ;;
         i3)
@@ -805,6 +884,13 @@ EOF
                 printf '\nYour chosen Flatpak apps were not (all) installed during setup. After the first\nboot, connected to the internet, run:  %s /usr/local/sbin/install-my-flatpaks\n' "$PRIV_TOOL"
             fi
         fi
+        local login_sh
+        login_sh=$(getent passwd "$USERNAME" | cut -d: -f7)
+        printf '\nLogin shell\n-----------\n%s uses %s. root uses bash.\nChange it with: chsh -s <path>   (list the allowed ones with: cat /etc/shells)\n' "$USERNAME" "$login_sh"
+        case "${login_sh##*/}" in
+            fish|nu) printf 'This shell does not read /etc/profile. If a program is missing from PATH or an\nenvironment setting is not applied, add it to the shell'"'"'s own configuration.\n' ;;
+            zsh) printf 'A starter ~/.zshrc was written (history, completion, the Gentoo prompt).\n' ;;
+        esac
         if [[ $DE == "sway" ]]; then
             printf '\nSway\n----\nSuper+Enter opens a terminal (foot), Super+d the app launcher (wofi),\nSuper+Shift+e exits. Your config: ~/.config/sway/config (man 5 sway).\n'
         fi

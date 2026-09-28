@@ -39,7 +39,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.3.0"
 readonly MNT="/mnt/gentoo"
 readonly LIVE_LOG="/tmp/gentoo-install.log"
 readonly LIVE_CONF_COPY="/tmp/gentoo-install.conf"
@@ -79,7 +79,7 @@ CONFIG_VARS=(
     NET_TOOL WANT_BT WANT_CUPS WANT_SSH WANT_FLATPAK FLATPAK_APPS EXTRA_PKGS
     CPU_VENDOR CPU_MODEL NPROC RAM_GIB IS_LAPTOP HAS_WIFI HAS_BT VIRT SECURE_BOOT
     HAS_NVIDIA HAS_AMD HAS_INTEL GPU_VM GPU_DRIVER VIDEO_CARDS NVIDIA_GEN
-    IS_APPLE MAC_MODEL LIVE_BOOT_MODE
+    IS_APPLE MAC_MODEL LIVE_BOOT_MODE USER_SHELL
     PROFILE_SUFFIX STAGE3_VARIANT MAKE_JOBS EMERGE_JOBS
     KERNEL_CMDLINE GRUB_EXTRA_CMDLINE DIST_BASE GENTOO_MIRRORS_VALUE
 )
@@ -93,12 +93,43 @@ init_defaults() {
     KEYMAP="us"
     XKB_LAYOUT="us"
     GPU_DRIVER="mesa"
+    USER_SHELL="bash"
     ROOT_PASSWORD=""
     USER_PASSWORD=""
     LUKS_PASSWORD=""
     STAGE3_URL=""
     STAGE3_FILE=""
 }
+
+# Login shells offered for the user account. These are the interactive login
+# shells in Gentoo's app-shells category with a stable amd64 version.
+# Fields: choice|packages (space separated)|command name|menu label
+SHELL_CATALOG=(
+    "bash|app-shells/bash|bash|bash (Gentoo's default, recommended)"
+    "zsh|app-shells/zsh app-shells/gentoo-zsh-completions|zsh|zsh (bash-like, more interactive features)"
+    "fish|app-shells/fish|fish|fish (friendly, good defaults; not POSIX)"
+    "nushell|app-shells/nushell|nu|Nushell (structured data; not POSIX)"
+    "dash|app-shells/dash|dash|sh: dash (minimal POSIX sh)"
+    "ksh|app-shells/ksh|ksh|ksh (AT&T Korn shell)"
+    "mksh|app-shells/mksh|mksh|mksh (MirBSD Korn shell)"
+    "loksh|app-shells/loksh|ksh|loksh (OpenBSD Korn shell)"
+    "yash|app-shells/yash|yash|yash (strict POSIX, with line editing)"
+    "tcsh|app-shells/tcsh|tcsh|tcsh (C shell syntax)"
+)
+
+# shell_field CHOICE N: field N (1-4) of a SHELL_CATALOG entry.
+shell_field() {
+    local entry
+    for entry in "${SHELL_CATALOG[@]}"; do
+        if [[ ${entry%%|*} == "$1" ]]; then
+            cut -d'|' -f"$2" <<<"$entry"
+            return 0
+        fi
+    done
+    return 1
+}
+
+valid_shell_choice() { shell_field "$1" 1 >/dev/null; }
 
 # ----------------------------------------------------------------------------
 # Output helpers
@@ -1600,6 +1631,25 @@ q_accounts() {
     ask USERNAME "Username (lowercase)" "${USERNAME:-}" valid_username
     ask_password USER_PASSWORD "password for ${USERNAME}" 1
 
+    local entry
+    local -a shell_items=()
+    for entry in "${SHELL_CATALOG[@]}"; do
+        shell_items+=("${entry%%|*}|${entry##*|}")
+    done
+    say "The login shell is the command-line shell ${USERNAME} gets in a terminal and on the text console. bash is Gentoo's default and what nearly every guide assumes. Any other choice is installed alongside it: root keeps bash, so recovery always works, and system scripts are unaffected because /bin/sh stays bash."
+    valid_shell_choice "${USER_SHELL:-}" || USER_SHELL="bash"
+    choose USER_SHELL "Login shell for ${USERNAME}" "$USER_SHELL" "${shell_items[@]}"
+    case "$USER_SHELL" in
+        fish|nushell)
+            say "$(shell_field "$USER_SHELL" 4 | cut -d' ' -f1) is not a POSIX shell: commands copied from guides sometimes need changes. It also does not read /etc/profile, so environment settings that Gentoo packages add there (for example extra PATH entries) are missing in its login sessions unless you add them to its own configuration. It is written in Rust and is compiled from source if no binary package is available, which can take a while."
+            if [[ $USER_SHELL == "nushell" && $DE == "sway" ]]; then
+                say "Sway is not started automatically after login with Nushell. Type 'sway' after logging in on the first console."
+            fi
+            ;;
+        tcsh) say "tcsh uses C shell syntax, which differs from the sh-style commands in most guides and scripts." ;;
+        dash) say "dash is a minimal POSIX sh. It is fast, but has no command history or line editing, so it is awkward as an everyday interactive shell." ;;
+    esac
+
     say "sudo is the standard tool for running a command as administrator. doas is a much smaller alternative from OpenBSD. Either way, your user is added to the 'wheel' group, which is allowed to use it."
     choose PRIV_TOOL "Administrator tool" "${PRIV_TOOL:-sudo}" \
         "sudo|sudo (standard, recommended)" \
@@ -1886,7 +1936,7 @@ print_summary() {
     summary_row "Locale:" "$LOCALE"
     summary_row "Console keymap:" "$KEYMAP"
     if [[ $DE != "none" ]]; then summary_row "Desktop keyboard:" "${XKB_LAYOUT}${XKB_VARIANT:+ (${XKB_VARIANT})}"; fi
-    summary_row "User:" "$USERNAME (admin tool: ${PRIV_TOOL})"
+    summary_row "User:" "$USERNAME (admin tool: ${PRIV_TOOL}, shell: ${USER_SHELL:-bash})"
     echo
     summary_row "Network:" "$NET_TOOL"
     summary_row "Graphics driver:" "$( [[ $HAS_NVIDIA == yes ]] && echo "${GPU_DRIVER}$( [[ $GPU_DRIVER == nvidia && $NVIDIA_GEN == legacy580 ]] && echo " (580 branch)" )" || echo "Mesa (open source)" )"
@@ -2678,6 +2728,91 @@ emerge_pkgs() {
     run emerge "${EMERGE_OPTS[@]}" --noreplace "$@"
 }
 
+# Install the chosen login shell and make it the user's shell. If it cannot be
+# installed, the user keeps bash and the failure is listed at the end.
+set_user_shell() {
+    local want=${USER_SHELL:-bash} cmd path home="/home/${USERNAME}"
+    local -a pkgs=()
+    if [[ $want == "bash" ]] || ! valid_shell_choice "$want"; then return 0; fi
+    read -ra pkgs <<<"$(shell_field "$want" 2)"
+    cmd=$(shell_field "$want" 3)
+    info "Installing the ${want} shell for ${USERNAME}."
+    emerge_optional "the ${want} shell" "${pkgs[@]}"
+    path=$(command -v "$cmd" 2>/dev/null || true)
+    if [[ -z $path || ! -x $path ]]; then
+        warn "The ${want} shell is not available, so ${USERNAME} keeps bash. Change it later with: chsh -s <path to the shell>"
+        return 0
+    fi
+    # Login screens and chsh only accept shells listed in /etc/shells.
+    if ! grep -qxF "$path" /etc/shells 2>/dev/null; then
+        echo "$path" >>/etc/shells
+    fi
+    run usermod -s "$path" "$USERNAME"
+    ok "Login shell for ${USERNAME}: ${path}"
+    if [[ $want == "zsh" && ! -e $home/.zshrc ]]; then
+        # Without a ~/.zshrc, zsh starts an interactive setup wizard on first use.
+        printf '%s\n' "# Starter configuration written by gentoo-install.sh. Edit freely." \
+            "HISTFILE=~/.zsh_history" "HISTSIZE=10000" "SAVEHIST=10000" \
+            "setopt appendhistory sharehistory histignoredups" \
+            "bindkey -e" \
+            "autoload -Uz compinit && compinit" \
+            "zstyle ':completion:*' menu select" \
+            "autoload -Uz promptinit && promptinit" \
+            "prompt gentoo" >"$home/.zshrc"
+        chown "${USERNAME}:${USERNAME}" "$home/.zshrc"
+        ok "Wrote a starter ~/.zshrc for ${USERNAME}."
+    fi
+}
+
+# The file a login shell reads at login, and its syntax, for the shell USERNAME
+# actually has (the chosen one may have failed to install). Prints
+# "syntax file-relative-to-home", or nothing if autostart is not supported.
+login_file_for_user() {
+    local sh
+    sh=$(getent passwd "$USERNAME" | cut -d: -f7)
+    case "${sh##*/}" in
+        bash) echo "sh .bash_profile" ;;
+        zsh) echo "sh .zprofile" ;;
+        yash) echo "sh .yash_profile" ;;
+        dash|ksh|mksh|sh) echo "sh .profile" ;;
+        fish) echo "fish .config/fish/conf.d/sway-autostart.fish" ;;
+        tcsh|csh) echo "csh .login" ;;
+        *) ;;
+    esac
+}
+
+# write_sway_autostart HOME FLAG: start Sway after logging in on tty1.
+write_sway_autostart() {
+    local home=$1 flag=$2 syntax="" file="" target
+    read -r syntax file <<<"$(login_file_for_user)"
+    if [[ -z $file ]]; then
+        warn "Sway is not started automatically for this login shell. Type 'sway' after logging in on the first console."
+        return 0
+    fi
+    target="$home/$file"
+    if grep -q "exec sway" "$target" 2>/dev/null; then return 0; fi
+    mkdir -p "$(dirname "$target")"
+    case "$syntax" in
+        sh)
+            printf '%s\n' "" "# Start Sway after logging in on the first console (tty1)." \
+                "# Added by gentoo-install.sh. Delete these lines to turn it off." \
+                "if [ -z \"\${WAYLAND_DISPLAY:-}\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]; then" \
+                "    exec sway${flag}" "fi" >>"$target" ;;
+        fish)
+            printf '%s\n' "# Start Sway after logging in on the first console (tty1)." \
+                "# Added by gentoo-install.sh. Delete this file to turn it off." \
+                "if status is-login; and test -z \"\$WAYLAND_DISPLAY\"; and test (tty) = /dev/tty1" \
+                "    exec sway${flag}" "end" >"$target" ;;
+        csh)
+            printf '%s\n' "" "# Start Sway after logging in on the first console (tty1)." \
+                "# Added by gentoo-install.sh. Delete these lines to turn it off." \
+                "if ( ! \$?WAYLAND_DISPLAY ) then" \
+                "    if ( \"\`tty\`\" == \"/dev/tty1\" ) exec sway${flag}" "endif" >>"$target" ;;
+    esac
+    chown -R "${USERNAME}:${USERNAME}" "$home/${file%%/*}"
+    ok "Sway starts after logging in on tty1 (set up in ~/${file})."
+}
+
 # emerge_optional "label" PKG...: failures are recorded but do not stop the install.
 emerge_optional() {
     local label=$1
@@ -3034,6 +3169,7 @@ c_users() {
     fi
     usermod -p "$USER_HASH" "$USERNAME"
     ok "User ${USERNAME} created and password set."
+    set_user_shell
 
     if [[ $PRIV_TOOL == "sudo" ]]; then
         mkdir -p /etc/sudoers.d
@@ -3361,16 +3497,9 @@ setup_user_desktop() {
                     fi
                 } >>"$cfg"
             fi
-            if [[ $SWAY_AUTOSTART == "yes" ]] && ! grep -q "exec sway" "$home/.bash_profile" 2>/dev/null; then
+            if [[ $SWAY_AUTOSTART == "yes" ]]; then
                 if [[ $GPU_DRIVER == "nvidia" ]]; then flag=" --unsupported-gpu"; fi
-                {
-                    echo ""
-                    echo "# Start Sway after logging in on the first console (tty1)."
-                    echo "# Added by gentoo-install.sh. Delete these lines to turn it off."
-                    echo "if [ -z \"\${WAYLAND_DISPLAY:-}\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]; then"
-                    echo "    exec sway${flag}"
-                    echo "fi"
-                } >>"$home/.bash_profile"
+                write_sway_autostart "$home" "$flag"
             fi
             ;;
         i3)
@@ -3458,6 +3587,13 @@ EOF
                 printf '\nYour chosen Flatpak apps were not (all) installed during setup. After the first\nboot, connected to the internet, run:  %s /usr/local/sbin/install-my-flatpaks\n' "$PRIV_TOOL"
             fi
         fi
+        local login_sh
+        login_sh=$(getent passwd "$USERNAME" | cut -d: -f7)
+        printf '\nLogin shell\n-----------\n%s uses %s. root uses bash.\nChange it with: chsh -s <path>   (list the allowed ones with: cat /etc/shells)\n' "$USERNAME" "$login_sh"
+        case "${login_sh##*/}" in
+            fish|nu) printf 'This shell does not read /etc/profile. If a program is missing from PATH or an\nenvironment setting is not applied, add it to the shell'"'"'s own configuration.\n' ;;
+            zsh) printf 'A starter ~/.zshrc was written (history, completion, the Gentoo prompt).\n' ;;
+        esac
         if [[ $DE == "sway" ]]; then
             printf '\nSway\n----\nSuper+Enter opens a terminal (foot), Super+d the app launcher (wofi),\nSuper+Shift+e exits. Your config: ~/.config/sway/config (man 5 sway).\n'
         fi
@@ -3623,7 +3759,7 @@ install_gentoo_helper() {
 
 set -uo pipefail
 
-readonly VERSION="1.2.0"
+readonly VERSION="1.3.0"
 readonly LOG="/var/log/gentoo-helper.log"
 readonly STATE_DIR="/var/lib/gentoo-helper"
 readonly LAST_FAILURE="/var/log/gentoo-helper-last-failure.txt"
