@@ -285,7 +285,11 @@ c_bootloader_prep() {
         emerge_pkgs "${pkgs[@]}"
         if [[ $BOOT_MODE == "uefi" ]]; then
             local nvram_ok="yes"
-            if ! run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo; then
+            if [[ ! -d /sys/firmware/efi/efivars ]]; then
+                info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. GRUB also goes to the fallback path EFI/BOOT/BOOTX64.EFI, which the firmware finds by itself."
+                run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
+                nvram_ok="no"
+            elif ! run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo; then
                 warn "Could not add a boot entry to the firmware's boot menu (NVRAM). Installing GRUB without it."
                 run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
                 nvram_ok="no"
@@ -319,7 +323,12 @@ c_bootloader_prep() {
         else
             run emerge "${EMERGE_OPTS[@]}" --oneshot --update --newuse sys-apps/systemd
         fi
-        if ! run bootctl install; then
+        local -a bootctl_opts=()
+        if [[ ! -d /sys/firmware/efi/efivars ]]; then
+            info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. systemd-boot is installed at the fallback path EFI/BOOT/BOOTX64.EFI, which the firmware finds by itself."
+            bootctl_opts=(--no-variables)
+        fi
+        if ! run bootctl install "${bootctl_opts[@]}"; then
             warn "bootctl could not update the firmware boot menu; installing without it (the fallback path still works)."
             run bootctl install --graceful
         fi

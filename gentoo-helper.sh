@@ -28,7 +28,7 @@
 
 set -uo pipefail
 
-readonly VERSION="1.1.0"
+readonly VERSION="1.2.0"
 readonly LOG="/var/log/gentoo-helper.log"
 readonly STATE_DIR="/var/lib/gentoo-helper"
 readonly LAST_FAILURE="/var/log/gentoo-helper-last-failure.txt"

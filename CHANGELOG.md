@@ -1,8 +1,18 @@
 # Changelog
 
+## 1.2.0 (2026-09-28)
+
+### Fixed
+- Intel Macs: when the live system was started in BIOS mode (for example with Ventoy, whose EFI mode does not start on some Macs), the installation did not boot. Macs only boot a BIOS-mode installation from an MBR disk, and the installer creates GPT, so the Mac showed a flashing folder. The installer now detects Apple hardware and offers (recommended) to install for EFI anyway. Reported on a 2013 MacBook Pro.
+- When the live system is not started in EFI mode, GRUB and systemd-boot are installed straight to the fallback path `EFI/BOOT/BOOTX64.EFI` (`--no-nvram` / `--no-variables`) instead of first failing to write a firmware boot entry.
+
+### Changed
+- Macs with 32-bit EFI firmware (2006 and 2007 models) are refused with an explanation before any disk is touched, since this installer cannot make them boot.
+- The hardware summary shows the Mac model, the install summary notes when the bootloader goes to the EFI fallback path, and the final screen tells Mac users how to pick the boot entry if needed.
+
 ## 1.1.0 (2026-09-26)
 
-Versions apply to `gentoo-install.sh`, `gentoo-install-tui.sh` and `gentoo-helper.sh` together.
+Monthly maintenance review. Versions apply to `gentoo-install.sh`, `gentoo-install-tui.sh` and `gentoo-helper.sh` together.
 
 ### Fixed
 - Disk space cleanup did not delete downloaded binary packages any more. Current Portage stores them in `/var/cache/binhost/<name>` instead of `PKGDIR` (Gentoo news item 2026-05-03). The installer now clears that location too, including any custom `location` set in `binrepos.conf`. This affects the free space check before each step and the cleanups after the base update, the desktop and the final step.

@@ -714,7 +714,7 @@ print_summary() {
     summary_row "CPU_FLAGS_X86:" "$( [[ $TUNE_CPU_FLAGS == yes ]] && echo "detected with cpuid2cpuflags" || echo "profile default" )"
     summary_row "VIDEO_CARDS:" "${VIDEO_CARDS:-(none)}"
     echo
-    summary_row "Boot mode / bootloader:" "${BOOT_MODE^^} / ${BOOTLOADER}"
+    summary_row "Boot mode / bootloader:" "${BOOT_MODE^^} / ${BOOTLOADER}$( [[ $LIVE_BOOT_MODE == bios && $BOOT_MODE == uefi ]] && echo "   (live system in BIOS mode: bootloader at the EFI fallback path)" )"
     if [[ $PART_MODE == "auto" ]]; then
         summary_row "Disk:" "${DISK}  ${C_RED}(EVERYTHING ON IT WILL BE ERASED)${C_RESET}"
     else

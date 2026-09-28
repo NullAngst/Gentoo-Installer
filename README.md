@@ -13,21 +13,13 @@ Installed systems also get **`gentoo-helper`**, simple menus for everyday packag
 
 It is meant for people who want a Gentoo system without typing the Handbook in by hand, and who still want to see what is happening and why. Every command it runs is printed and logged, and every configuration file it writes is commented.
 
-> **Status:** version 1.1.0 (see [CHANGELOG.md](CHANGELOG.md)). One combination has been installed end to end on a virtual machine and boots to a working desktop; every other combination is untested, see [Tested combinations](#tested-combinations). Both installers and `gentoo-helper` pass `bash -n` and ShellCheck, and their logic has been exercised in a sandbox against simulated Portage, service managers and `dialog`. Test in a VM first (see [Testing in a virtual machine](#testing-in-a-virtual-machine)) and please open an issue with the log if something fails.
+> **Status:** version 1.2.0 (see [CHANGELOG.md](CHANGELOG.md)). One combination has been installed end to end on a virtual machine and boots to a working desktop; every other combination is untested, see [Tested combinations](#tested-combinations). Both installers and `gentoo-helper` pass `bash -n` and ShellCheck, and their logic has been exercised in a sandbox against simulated Portage, service managers and `dialog`. Test in a VM first (see [Testing in a virtual machine](#testing-in-a-virtual-machine)) and please open an issue with the log if something fails.
 
 ## Tested combinations
 
 | Firmware | Bootloader | Init | Desktop | Root filesystem | Encryption | Installer | Machine | Result |
 |---|---|---|---|---|---|---|---|---|
 | BIOS | GRUB | systemd | KDE Plasma | ext4 | none | menu (TUI) | QEMU/KVM virtual machine | Installed, boots, network works (2026-09-25) |
-
-| Firmware | Bootloader | Init | Desktop | Root filesystem | Encryption | Installer | Machine | Result |
-|---|---|---|---|---|---|---|---|---|
-| BIOS | GRUB | openrc | KDE Plasma | xfs | none | menu (CLI) | QEMU/KVM virtual machine | Installed, boots, network works (2026-09-26) |
-
-| Firmware | Bootloader | Init | Desktop | Root filesystem | Encryption | Installer | Machine | Result |
-|---|---|---|---|---|---|---|---|---|
-| UEFI | GRUB | openrc | MATE | BtrFS | none | menu (TUI) | QEMU/KVM virtual machine | Installed, boots, network works (2026-09-26) |
 
 Everything else is untested so far, including UEFI, systemd-boot, LUKS encryption, Btrfs, XFS, OpenRC, the other desktops, manual partitioning, the console installer, and real hardware. `gentoo-helper` has been tested only in a sandbox with simulated Portage, not on a real system yet.
 
@@ -76,6 +68,7 @@ Everything else is untested so far, including UEFI, systemd-boot, LUKS encryptio
 - An internet connection.
 - Disk space: at least 40 GiB for a desktop installation (60 GiB or more is comfortable), 20 GiB without a desktop. The installer refuses smaller disks, because a desktop's packages, Portage's downloads and temporary build files need the room, and running out of space mid-build fails in confusing ways.
 - Secure Boot turned off in the firmware before you boot the installed system (see [Limitations](#limitations)).
+- Intel Macs from 2008 onward work even when the live USB can only be started in BIOS mode (common with Ventoy on Macs): see [Limitations](#limitations).
 
 ## Quick start
 
@@ -280,6 +273,7 @@ These are the choices the installer makes on your behalf, with what they cost.
 - **Mostly untested.** Only the combination in [Tested combinations](#tested-combinations) has been installed end to end so far, on a virtual machine.
 - **Secure Boot is not supported.** Nothing is signed. Disable Secure Boot in the firmware, or set up signing yourself afterwards (Gentoo wiki: *Secure Boot*).
 - **amd64 only.** 32-bit UEFI firmware is refused; boot the live image in BIOS/CSM mode on such machines.
+- **Intel Macs.** Macs only boot a BIOS-mode installation from a disk with an MBR partition table, and this installer uses GPT. So when a Mac's live system was started in BIOS mode, the installer offers (and recommends) installing for EFI anyway: the bootloader goes to the fallback path `EFI/BOOT/BOOTX64.EFI`, which the Mac finds by itself; if it does not, hold Option at power-on and choose "EFI Boot". Macs from 2006 and 2007 with 32-bit EFI firmware are refused, since neither route can make them boot. This path is untested on a real Mac so far.
 - **No LVM, RAID, ZFS or multi-disk root,** and no separate `/home` partition (Btrfs gets an `@home` subvolume).
 - **No hibernation** setup, with any swap choice.
 - **Encryption scope.** LUKS2 covers the root filesystem. With GRUB, `/boot` is a separate unencrypted partition; with systemd-boot, kernels sit on the unencrypted EFI partition. Either way the kernel and initramfs are readable and could be tampered with by someone with physical access. There is no TPM unlock or keyfile support. The boot-time passphrase prompt may use the US layout, so the installer advises a passphrase that types the same on US and your layout.

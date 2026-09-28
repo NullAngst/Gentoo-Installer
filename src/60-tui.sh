@@ -854,6 +854,7 @@ tui_fresh_install() {
     sync_clock
     detect_hardware
     show_hardware
+    mac_boot_check
     tui_refresh_defaults
     tui_hub
     tui_install

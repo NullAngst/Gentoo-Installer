@@ -642,6 +642,9 @@ finish_install() {
     if [[ $SECURE_BOOT == "on" ]]; then
         warn "Secure Boot is still enabled. Disable it in the firmware setup, or Gentoo will not boot."
     fi
+    if [[ $IS_APPLE == "yes" && $BOOT_MODE == "uefi" ]]; then
+        say "On this Mac: if it shows a flashing folder with a question mark after the restart, hold the Option key while it starts and choose 'EFI Boot'."
+    fi
     if yesno "Unmount the new system now?" y; then
         unmount_all
         ok "Unmounted."
@@ -711,6 +714,7 @@ fresh_install() {
     sync_clock
     detect_hardware
     show_hardware
+    mac_boot_check
     while true; do
         ask_all_questions
         print_summary

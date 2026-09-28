@@ -39,7 +39,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 readonly MNT="/mnt/gentoo"
 readonly LIVE_LOG="/tmp/gentoo-install.log"
 readonly LIVE_CONF_COPY="/tmp/gentoo-install.conf"
@@ -79,6 +79,7 @@ CONFIG_VARS=(
     NET_TOOL WANT_BT WANT_CUPS WANT_SSH WANT_FLATPAK FLATPAK_APPS EXTRA_PKGS
     CPU_VENDOR CPU_MODEL NPROC RAM_GIB IS_LAPTOP HAS_WIFI HAS_BT VIRT SECURE_BOOT
     HAS_NVIDIA HAS_AMD HAS_INTEL GPU_VM GPU_DRIVER VIDEO_CARDS NVIDIA_GEN
+    IS_APPLE MAC_MODEL LIVE_BOOT_MODE
     PROFILE_SUFFIX STAGE3_VARIANT MAKE_JOBS EMERGE_JOBS
     KERNEL_CMDLINE GRUB_EXTRA_CMDLINE DIST_BASE GENTOO_MIRRORS_VALUE
 )
@@ -1014,6 +1015,10 @@ detect_hardware() {
     esac
     if [[ $VIRT == "none" && $flags == *" hypervisor "* ]]; then VIRT="other"; fi
 
+    IS_APPLE="no"; MAC_MODEL=""
+    if [[ $vendor == *Apple* ]]; then IS_APPLE="yes"; MAC_MODEL=$(trim "$product"); fi
+    LIVE_BOOT_MODE=$BOOT_MODE
+
     IS_LAPTOP="no"
     if compgen -G "/sys/class/power_supply/BAT*" >/dev/null; then IS_LAPTOP="yes"; fi
     case "$(cat /sys/class/dmi/id/chassis_type 2>/dev/null || echo 0)" in
@@ -1048,6 +1053,9 @@ show_hardware() {
         printf -v b '%s  %-22s %s\n' "$b" "Secure Boot:" "$SECURE_BOOT"
     fi
     printf -v b '%s  %-22s %s\n' "$b" "Virtual machine:" "$vm"
+    if [[ $IS_APPLE == "yes" ]]; then
+        printf -v b '%s  %-22s %s\n' "$b" "Apple Mac:" "${MAC_MODEL:-yes}"
+    fi
     printf -v b '%s  %-22s %s\n' "$b" "Laptop:" "$IS_LAPTOP"
     printf -v b '%s  %-22s %s\n' "$b" "Wi-Fi adapter:" "$HAS_WIFI"
     printf -v b '%s  %-22s %s\n' "$b" "Bluetooth adapter:" "$HAS_BT"
@@ -1066,10 +1074,51 @@ show_hardware() {
         warn "Secure Boot is enabled in your firmware."
         say "This installer does not sign the kernel or bootloader, so the installed system will not boot while Secure Boot is on. Disable Secure Boot in the firmware setup before rebooting into Gentoo (you can set up signing later; see the Gentoo wiki page 'Secure Boot')."
     fi
-    if [[ $BOOT_MODE == "bios" ]]; then
+    if [[ $BOOT_MODE == "bios" && $IS_APPLE != "yes" ]]; then
         say "The live image was started in legacy BIOS mode. If this computer supports UEFI (almost everything made after 2012 does), consider rebooting the live image in UEFI mode first: it is the more modern and better supported setup. Continuing in BIOS mode works too (GRUB is used)."
     fi
     pause
+}
+
+# Intel Macs with 32-bit EFI firmware (2006 and 2007 models). All later Intel
+# Macs have 64-bit EFI. Model identifiers as shown in DMI product_name.
+mac_has_32bit_efi() {
+    case "$1" in
+        MacBook1,1|MacBook2,1|MacBookPro1,1|MacBookPro1,2|MacBookPro2,1|MacBookPro2,2|\
+        iMac4,1|iMac4,2|iMac5,1|iMac5,2|iMac6,1|Macmini1,1|Macmini2,1|MacPro1,1|MacPro2,1|Xserve1,1)
+            return 0 ;;
+    esac
+    return 1
+}
+
+# Intel Macs choose between legacy (BIOS) and EFI boot from the partition table:
+# they only boot a disk in legacy mode if it has an MBR (or hybrid MBR)
+# partition table with a partition marked bootable. This installer uses GPT, so
+# on a Mac a BIOS-mode installation does not boot (the Mac shows a flashing
+# folder). When the live system was started in BIOS mode on a Mac (Ventoy's EFI
+# mode does not start on some Macs, for example), install for EFI instead. The
+# bootloader then goes to the fallback path EFI/BOOT/BOOTX64.EFI, which works
+# without access to the firmware's boot menu from the live system.
+mac_boot_check() {
+    local target
+    if [[ $IS_APPLE != "yes" || $BOOT_MODE != "bios" ]]; then return 0; fi
+    section "Apple Mac started in BIOS mode"
+    if mac_has_32bit_efi "$MAC_MODEL"; then
+        die "This Mac (${MAC_MODEL}) has 32-bit EFI firmware. This installer supports only 64-bit EFI, and Macs do not boot a BIOS-mode installation from a GPT disk, which is what this installer creates, so it cannot produce a system that boots on this Mac. Nothing on disk has been changed."
+    fi
+    say "This is an Apple Mac${MAC_MODEL:+ (${MAC_MODEL})}, and the live system was started in legacy BIOS mode. That is common with Ventoy, whose EFI mode does not start on some Macs." \
+        "Macs only boot a BIOS-mode installation from a disk with an MBR partition table. This installer uses a GPT partition table, so a BIOS-mode installation would not start: the Mac would show a flashing folder with a question mark." \
+        "Instead, the installer can set up the new system for EFI, the Mac's native boot mode, even though the live system runs in BIOS mode. The bootloader is then placed at the standard fallback location that the Mac finds by itself. If it does not start automatically, hold the Option key while the Mac starts and choose 'EFI Boot'."
+    choose target "How should the new system start?" "uefi" \
+        "uefi|Install for EFI, the Mac's native boot mode (recommended)" \
+        "bios|Install for BIOS anyway (the Mac will not start it without extra manual steps)"
+    if [[ $target == "uefi" ]]; then
+        BOOT_MODE="uefi"
+        UEFI_BITS="64"
+        ok "The new system will be installed for EFI."
+    else
+        warn "Installing for BIOS on a GPT disk: this Mac will not start it unless you add something like a hybrid MBR yourself."
+    fi
 }
 
 # Print the disk the live image was booted from, so it is never offered.
@@ -1815,7 +1864,7 @@ print_summary() {
     summary_row "CPU_FLAGS_X86:" "$( [[ $TUNE_CPU_FLAGS == yes ]] && echo "detected with cpuid2cpuflags" || echo "profile default" )"
     summary_row "VIDEO_CARDS:" "${VIDEO_CARDS:-(none)}"
     echo
-    summary_row "Boot mode / bootloader:" "${BOOT_MODE^^} / ${BOOTLOADER}"
+    summary_row "Boot mode / bootloader:" "${BOOT_MODE^^} / ${BOOTLOADER}$( [[ $LIVE_BOOT_MODE == bios && $BOOT_MODE == uefi ]] && echo "   (live system in BIOS mode: bootloader at the EFI fallback path)" )"
     if [[ $PART_MODE == "auto" ]]; then
         summary_row "Disk:" "${DISK}  ${C_RED}(EVERYTHING ON IT WILL BE ERASED)${C_RESET}"
     else
@@ -2515,6 +2564,9 @@ finish_install() {
     if [[ $SECURE_BOOT == "on" ]]; then
         warn "Secure Boot is still enabled. Disable it in the firmware setup, or Gentoo will not boot."
     fi
+    if [[ $IS_APPLE == "yes" && $BOOT_MODE == "uefi" ]]; then
+        say "On this Mac: if it shows a flashing folder with a question mark after the restart, hold the Option key while it starts and choose 'EFI Boot'."
+    fi
     if yesno "Unmount the new system now?" y; then
         unmount_all
         ok "Unmounted."
@@ -2584,6 +2636,7 @@ fresh_install() {
     sync_clock
     detect_hardware
     show_hardware
+    mac_boot_check
     while true; do
         ask_all_questions
         print_summary
@@ -2885,7 +2938,11 @@ c_bootloader_prep() {
         emerge_pkgs "${pkgs[@]}"
         if [[ $BOOT_MODE == "uefi" ]]; then
             local nvram_ok="yes"
-            if ! run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo; then
+            if [[ ! -d /sys/firmware/efi/efivars ]]; then
+                info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. GRUB also goes to the fallback path EFI/BOOT/BOOTX64.EFI, which the firmware finds by itself."
+                run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
+                nvram_ok="no"
+            elif ! run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo; then
                 warn "Could not add a boot entry to the firmware's boot menu (NVRAM). Installing GRUB without it."
                 run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
                 nvram_ok="no"
@@ -2919,7 +2976,12 @@ c_bootloader_prep() {
         else
             run emerge "${EMERGE_OPTS[@]}" --oneshot --update --newuse sys-apps/systemd
         fi
-        if ! run bootctl install; then
+        local -a bootctl_opts=()
+        if [[ ! -d /sys/firmware/efi/efivars ]]; then
+            info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. systemd-boot is installed at the fallback path EFI/BOOT/BOOTX64.EFI, which the firmware finds by itself."
+            bootctl_opts=(--no-variables)
+        fi
+        if ! run bootctl install "${bootctl_opts[@]}"; then
             warn "bootctl could not update the firmware boot menu; installing without it (the fallback path still works)."
             run bootctl install --graceful
         fi
@@ -3561,7 +3623,7 @@ install_gentoo_helper() {
 
 set -uo pipefail
 
-readonly VERSION="1.1.0"
+readonly VERSION="1.2.0"
 readonly LOG="/var/log/gentoo-helper.log"
 readonly STATE_DIR="/var/lib/gentoo-helper"
 readonly LAST_FAILURE="/var/log/gentoo-helper-last-failure.txt"
