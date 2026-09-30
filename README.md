@@ -165,8 +165,6 @@ Why? Because Macs pick legacy or EFI boot from the partition table. They only bo
 
 Since 1.2.0, the installer spots a Mac that started the live system in BIOS mode, explains this, and recommends installing for EFI anyway. The bootloader then goes to the fallback path `EFI/BOOT/BOOTX64.EFI`, which the Mac finds on its own. If it doesn't, hold Option at power-on and pick "EFI Boot". Macs from 2006 and 2007 have 32-bit EFI, which neither route can boot, so the installer stops on those before touching the disk.
 
-I haven't re-tested this on the Mac yet.
-
 ## Login shells
 
 Part 4 asks which login shell your user gets. The choices are the interactive login shells in Gentoo's `app-shells` category with a stable amd64 version:
