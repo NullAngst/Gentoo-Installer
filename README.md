@@ -22,7 +22,7 @@ Version 1.3.0, see [CHANGELOG.md](CHANGELOG.md). I've installed three combinatio
 | UEFI | GRUB | OpenRC | MATE | Btrfs | none | menu (TUI) | QEMU/KVM virtual machine | Installed, boots, network works (2026-09-26) |
 | UEFI | GRUB | systemd | KDE Plasma | Btrfs | none | menu (TUI) | 2013 Macbook Pro | Installed, boots, network works (2026-09-28) |
 
-Everything else is untested: systemd-boot, LUKS encryption, the GNOME, Cinnamon, Xfce, LXQt, Sway and i3 desktops, manual partitioning, the login shell choice, and real hardware. My one real-hardware attempt, a 2013 MacBook Pro, turned up a Mac boot problem that 1.2.0 fixes (see [Intel Macs](#intel-macs)), but I haven't re-tested on the Mac since. `gentoo-helper` has only been tested in a sandbox against simulated Portage.
+Everything else is untested: systemd-boot, LUKS encryption, the GNOME, Cinnamon, Xfce, LXQt, Sway and i3 desktops, manual partitioning, the login shell choice, and real hardware. My one real-hardware attempt, a 2013 MacBook Pro, turned up a Mac boot problem that 1.2.0 fixes (see [Intel Macs](#intel-macs)), the fix resolved the issues and it installs now.
 
 Both installers and the helper pass `bash -n` and ShellCheck, and their logic has been run in a sandbox against simulated Portage, service managers and `dialog`. That's not the same as a real install. I beg you to try it in a VM before you point it at a disk you care about (see [Testing in a virtual machine](#testing-in-a-virtual-machine)). If something fails, open an issue with the log.
 
