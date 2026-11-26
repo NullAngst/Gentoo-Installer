@@ -33,25 +33,19 @@ declare -A SEC_FN=([sys]=q_system_type [disk]=q_disk_layout [region]=q_region
 declare -A SEC_VARS=(
     [sys]="DE DM SWAY_AUTOSTART INIT USE_BINPKG BINHOST_V3 TUNE_CPU_FLAGS KERNEL_PKG"
     [region]="NEW_HOSTNAME TIMEZONE LOCALE XKB_LAYOUT XKB_VARIANT"
-    [hw]="GPU_DRIVER VIDEO_CARDS NET_TOOL WANT_BT WANT_CUPS WANT_SSH"
+    [hw]="GPU_DRIVER VIDEO_CARDS NET_TOOL WANT_BT WANT_CUPS WANT_SSH WANT_BCM_WL WANT_POWER POWER_TOOL WANT_MBPFAN"
     [sw]="GENTOO_MIRRORS_VALUE WANT_FLATPAK FLATPAK_APPS EXTRA_PKGS"
 )
 SEC_ORDER=(sys disk region acct hw sw)
 
-# Keep the console versions of the front-end functions as cli_<name>.
-for __fn in say say_pre section subsection info ok warn die run choose choose_multi ask ask_yn ask_password pause handoff_screen ask_timezone; do
-    eval "$(declare -f "$__fn" | sed "1s/^${__fn} /cli_${__fn} /")"
-done
-unset __fn
-
 usage() {
     cat <<EOF
-gentoo-install-tui.sh ${SCRIPT_VERSION}: guided Gentoo Linux installer for amd64 (menu version)
+gentoo_install_tui.sh ${SCRIPT_VERSION}: guided Gentoo Linux installer for amd64 (menu version)
 
 Usage:
-  bash gentoo-install-tui.sh            Start a new installation
-  bash gentoo-install-tui.sh --resume   Continue after fixing a failed step
-  bash gentoo-install-tui.sh --help     Show this help
+  bash gentoo_install_tui.sh                 Start a new installation
+  bash gentoo_install_tui.sh -r, --resume    Continue after fixing a failed step
+  bash gentoo_install_tui.sh -h, --help      Show this help
 
 Needs 'dialog' (included on the official Gentoo live images) or 'whiptail'.
 Run it as root. Download it first, then run it; piping it into bash does not
@@ -76,7 +70,7 @@ tui_init() {
         TUI_PWOPT=()
         TUI_SCROLL=(--scrolltext)
     else
-        die "The menu version needs 'dialog' or 'whiptail', and neither is installed on this live system. Use the console version instead: curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh && bash gentoo-install.sh"
+        die "The menu version needs 'dialog' or 'whiptail', and neither is installed on this live system. Use the console version instead: curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo_install.sh && bash gentoo_install.sh"
     fi
     tui_dims
     log "TUI front end: ${TUI_BIN}"
@@ -84,8 +78,8 @@ tui_init() {
 
 tui_dims() {
     local h w
-    h=$(tput lines 2>/dev/null || echo 24)
-    w=$(tput cols 2>/dev/null || echo 80)
+    h=$(tput lines 2>/dev/null || printf '%s\n' 24)
+    w=$(tput cols 2>/dev/null || printf '%s\n' 80)
     [[ $h =~ ^[0-9]+$ ]] || h=24
     [[ $w =~ ^[0-9]+$ ]] || w=80
     TUI_MAXH=$(( h - 4 ))
@@ -111,7 +105,7 @@ tui_call() {
     # Cancel (1) and Esc (255) produce no output. Any other failure, or a failure
     # that printed a message, means dialog itself broke (for example a box that
     # cannot fit the terminal); stop instead of looping on a dialog that keeps failing.
-    if (( __tc_rc != 0 )) && { [[ -n $TUI_OUT ]] || (( __tc_rc != 1 && __tc_rc != 255 )); }; then
+    if (( __tc_rc != 0 )) && { [ -n "$TUI_OUT" ] || (( __tc_rc != 1 && __tc_rc != 255 )); }; then
         tui_fatal "${TUI_BIN} failed (exit code ${__tc_rc}): ${TUI_OUT:-no message}"
     fi
     return "$__tc_rc"
@@ -123,12 +117,12 @@ tui_fatal() {
     TUI_ACTIVE="no"
     log "FAIL: $*"
     err "$*"
-    err "Try a larger terminal window, or use the console installer (gentoo-install.sh), which asks the same questions."
+    err "Try a larger terminal window, or use the console installer (gentoo_install.sh), which asks the same questions."
     exit 1
 }
 
 tui_buf_add() {
-    if [[ -n $TUI_BUF ]]; then TUI_BUF+=$'\n\n'; fi
+    if [ -n "$TUI_BUF" ]; then TUI_BUF+=$'\n\n'; fi
     TUI_BUF+=$1
 }
 
@@ -139,11 +133,11 @@ tui_fit() {
     local q=$1 n=$2 w=$3 buf=$TUI_BUF text lines min_list
     TUI_BUF=""
     text=$buf
-    if [[ -n $text ]]; then text+=$'\n\n'; fi
+    if [ -n "$text" ]; then text+=$'\n\n'; fi
     text+=$q
     min_list=$(( n < 4 ? n : 4 ))
     lines=$(tui_lines "$text" $(( w - 4 )))
-    if (( lines + min_list + 8 > TUI_MAXH )) && [[ -n $buf ]]; then
+    if (( lines + min_list + 8 > TUI_MAXH )) && [ -n "$buf" ]; then
         tui_show "$buf"
         text=$q
         lines=$(tui_lines "$text" $(( w - 4 )))
@@ -158,22 +152,22 @@ tui_show() {
     tui_dims
     lines=$(tui_lines "$text" $(( TUI_BOXW - 4 )))
     if (( lines + 6 > TUI_MAXH )); then
-        tmp=$(mktemp)
+        tmp=$(work_file text)
         printf '%s\n' "$text" | fold -s -w $(( TUI_BOXW - 4 )) >"$tmp"
         tui_call "${TUI_SCROLL[@]}" --textbox "$tmp" "$TUI_MAXH" "$TUI_BOXW" || true
-        rm -f "$tmp"
+        rm -f -- "$tmp"
     else
         tui_call --msgbox "$text" $(( lines + 6 )) "$TUI_BOXW" || true
     fi
 }
 
 tui_quit() {
-    if [[ $IN_SECTION == "yes" ]]; then exit 11; fi
+    if [ "$IN_SECTION" = "yes" ]; then exit 11; fi
     tui_clear
     TUI_ACTIVE="no"
     log "Quit from the TUI"
-    if [[ $TUI_PHASE == "setup" ]]; then
-        echo "Gentoo installer: quit. Nothing on disk was changed."
+    if [ "$TUI_PHASE" = "setup" ]; then
+        printf '%s\n' "Gentoo installer: quit. Nothing on disk was changed."
     fi
     exit 0
 }
@@ -181,10 +175,10 @@ tui_quit() {
 # Called when a dialog is cancelled (Esc or the Cancel button).
 tui_cancelled() {
     local -a items=(1 "Continue where I was")
-    if [[ $IN_SECTION == "yes" ]]; then
+    if [ "$IN_SECTION" = "yes" ]; then
         items+=(2 "Back to the main menu (discard the changes made in this section)")
     fi
-    if [[ $TUI_PHASE == "setup" ]]; then
+    if [ "$TUI_PHASE" = "setup" ]; then
         items+=(3 "Quit the installer (nothing on disk has been changed)")
     else
         items+=(3 "Quit the installer")
@@ -205,18 +199,18 @@ tui_cancelled() {
 # ----------------------------------------------------------------------------
 tui_say() {
     local p
-    if [[ $TUI_AUTO == "yes" ]]; then return 0; fi
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
     for p in "$@"; do tui_buf_add "$p"; done
 }
 
 tui_say_pre() {
-    if [[ $TUI_AUTO == "yes" ]]; then return 0; fi
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
     tui_buf_add "$1"
 }
 
 tui_section() {
     log "===== $* ====="
-    if [[ $TUI_AUTO == "yes" ]]; then return 0; fi
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
     TUI_SECTION="$*"
     TUI_TITLE="$*"
     TUI_BUF=""
@@ -224,14 +218,14 @@ tui_section() {
 
 tui_subsection() {
     log "--- $* ---"
-    if [[ $TUI_AUTO == "yes" ]]; then return 0; fi
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
     TUI_TITLE="${TUI_SECTION} > $*"
 }
 
 # Short status messages: shown right away in a small box, and kept for the next dialog.
 tui_info() {
     log "INFO: $*"
-    if [[ $TUI_AUTO == "yes" ]]; then return 0; fi
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
     tui_buf_add "$*"
     tui_dims
     "$TUI_BIN" "${TUI_COMMON[@]}" --backtitle "$BACKTITLE" --title " ${TUI_TITLE} " \
@@ -240,7 +234,7 @@ tui_info() {
 
 tui_warn() {
     log "WARN: $*"
-    if [[ $TUI_AUTO == "yes" ]]; then return 0; fi
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
     tui_buf_add "WARNING: $*"
 }
 
@@ -261,7 +255,7 @@ tui_run() {
 
 tui_pause() {
     local t
-    if [[ $TUI_AUTO == "yes" || -z $TUI_BUF ]]; then return 0; fi
+    if [ "$TUI_AUTO" = "yes" ] || [ -z "$TUI_BUF" ]; then return 0; fi
     t=$TUI_BUF
     TUI_BUF=""
     tui_show "$t"
@@ -281,10 +275,10 @@ tui_choose() {
         __i=$(( __i + 1 ))
         __vals+=("${__o%%|*}")
         __items+=("$__i" "${__o#*|}")
-        if [[ ${__o%%|*} == "$__def" ]]; then __defi=$__i; fi
+        if [ "${__o%%|*}" = "$__def" ]; then __defi=$__i; fi
         if (( ${#__o} > __maxl )); then __maxl=${#__o}; fi
     done
-    if [[ $TUI_AUTO == "yes" ]]; then
+    if [ "$TUI_AUTO" = "yes" ]; then
         printf -v "$__var" '%s' "${__vals[__defi - 1]}"
         log "DEFAULT: ${__q} => ${__vals[__defi - 1]}"
         return 0
@@ -323,14 +317,14 @@ tui_choose_multi() {
         __i=$(( __i + 1 ))
         __vals+=("${__o%%|*}")
         __st="off"
-        if [[ $__cur == *" ${__o%%|*} "* ]]; then
+        if [[ $__cur = *" ${__o%%|*} "* ]]; then
             __st="on"
             __out+="${__out:+ }${__o%%|*}"
         fi
         __items+=("$__i" "${__o#*|}" "$__st")
         if (( ${#__o} > __maxl )); then __maxl=${#__o}; fi
     done
-    if [[ $TUI_AUTO == "yes" ]]; then
+    if [ "$TUI_AUTO" = "yes" ]; then
         printf -v "$__var" '%s' "$__out"
         log "DEFAULT: ${__q} => ${__out:-none}"
         return 0
@@ -366,8 +360,8 @@ tui_choose_multi() {
 # tui_ask VAR "Question" "default" [validator]
 tui_ask() {
     local __var=$1 __q=$2 __def=${3:-} __check=${4:-} __a __cur __h
-    if [[ $TUI_AUTO == "yes" ]]; then
-        if [[ -n $__def ]] && { [[ -z $__check ]] || "$__check" "$__def"; }; then
+    if [ "$TUI_AUTO" = "yes" ]; then
+        if [ -n "$__def" ] && { [ -z "$__check" ] || "$__check" "$__def"; }; then
             printf -v "$__var" '%s' "$__def"
             log "DEFAULT: ${__q} => ${__def}"
             return 0
@@ -383,12 +377,12 @@ tui_ask() {
         if tui_call --inputbox "$TUI_TEXT" "$__h" "$TUI_BOXW" "$__cur"; then
             __a=$(trim "$TUI_OUT")
             __cur=$__a
-            if [[ -z $__a ]]; then __a=$__def; fi
-            if [[ -z $__a ]]; then
+            if [ -z "$__a" ]; then __a=$__def; fi
+            if [ -z "$__a" ]; then
                 tui_buf_add "An answer is required."
                 continue
             fi
-            if [[ -n $__check ]] && ! "$__check" "$__a"; then
+            if [ -n "$__check" ] && ! "$__check" "$__a"; then
                 continue
             fi
             printf -v "$__var" '%s' "$__a"
@@ -403,12 +397,12 @@ tui_ask() {
 tui_ask_yn() {
     local __var=$1 __q=$2 __def=$3 __h __rc __text
     local -a __f=()
-    if [[ $TUI_AUTO == "yes" ]]; then
-        if [[ $__def == "y" ]]; then printf -v "$__var" 'yes'; else printf -v "$__var" 'no'; fi
+    if [ "$TUI_AUTO" = "yes" ]; then
+        if [ "$__def" = "y" ]; then printf -v "$__var" 'yes'; else printf -v "$__var" 'no'; fi
         log "DEFAULT: ${__q} => ${!__var}"
         return 0
     fi
-    if [[ $__def == "n" ]]; then __f=(--defaultno); fi
+    if [ "$__def" = "n" ]; then __f=(--defaultno); fi
     tui_dims
     tui_fit "$__q" 0 "$TUI_BOXW"
     __text=$TUI_TEXT
@@ -421,7 +415,7 @@ tui_ask_yn() {
             0) printf -v "$__var" 'yes'; break ;;
             1) printf -v "$__var" 'no'; break ;;
             *)
-                if [[ $TUI_PHASE == "finish" ]]; then
+                if [ "$TUI_PHASE" = "finish" ]; then
                     printf -v "$__var" 'no'
                     break
                 fi
@@ -435,7 +429,7 @@ tui_ask_yn() {
 # tui_ask_password VAR "what" MIN_LENGTH
 tui_ask_password() {
     local __var=$1 __what=$2 __min=${3:-1} __p1 __p2 __h
-    if [[ $TUI_AUTO == "yes" ]]; then
+    if [ "$TUI_AUTO" = "yes" ]; then
         die "Internal error: a password cannot be filled in automatically."
     fi
     while true; do
@@ -458,7 +452,7 @@ tui_ask_password() {
         fi
         __p2=$TUI_OUT
         TUI_OUT=""
-        if [[ $__p1 != "$__p2" ]]; then
+        if [ "$__p1" != "$__p2" ]; then
             tui_buf_add "The two entries did not match. Try again."
             continue
         fi
@@ -476,7 +470,7 @@ tui_ask_password() {
 tui_ask_timezone() {
     local how cur=${TIMEZONE:-UTC} region city names
     local -a items=()
-    if [[ $TUI_AUTO == "yes" ]]; then
+    if [ "$TUI_AUTO" = "yes" ]; then
         TIMEZONE=$cur
         return 0
     fi
@@ -496,17 +490,17 @@ tui_ask_timezone() {
             browse)
                 names=$(tz_names)
                 items=()
-                while read -r region; do
+                while IFS= read -r region; do
                     items+=("${region}|${region}")
                 done < <(awk -F/ 'NF > 1 {print $1}' <<<"$names" | sort -u)
                 items+=("UTC|UTC (no time zone offset)")
                 choose region "Region" "${cur%%/*}" "${items[@]}"
-                if [[ $region == "UTC" ]]; then
+                if [ "$region" = "UTC" ]; then
                     TIMEZONE="UTC"
                     return 0
                 fi
                 items=()
-                while read -r city; do
+                while IFS= read -r city; do
                     items+=("${region}/${city}|${city//_/ }")
                 done < <(awk -v r="${region}/" 'index($0, r) == 1 {print substr($0, length(r) + 1)}' <<<"$names")
                 choose TIMEZONE "City in ${region}" "$cur" "${items[@]}"
@@ -515,31 +509,37 @@ tui_ask_timezone() {
     done
 }
 
+# The console's 'list' answer to the timezone question; in the menu version
+# the timezone menu has its own list.
 browse_timezones() {
-    warn "Browsing is done with the 'Pick from a list' option in the timezone menu."
+    if [ "$TUI_ACTIVE" = "yes" ]; then
+        warn "Browsing is done with the 'Pick from a list' option in the timezone menu."
+    else
+        cli_browse_timezones
+    fi
 }
 
 # ----------------------------------------------------------------------------
 # Front-end dispatch: dialogs while TUI_ACTIVE=yes, console output otherwise
 # (during the unattended installation, which prints its progress as text).
 # ----------------------------------------------------------------------------
-say()            { if [[ $TUI_ACTIVE == "yes" ]]; then tui_say "$@"; else cli_say "$@"; fi; }
-say_pre()        { if [[ $TUI_ACTIVE == "yes" ]]; then tui_say_pre "$@"; else cli_say_pre "$@"; fi; }
-section()        { if [[ $TUI_ACTIVE == "yes" ]]; then tui_section "$@"; else cli_section "$@"; fi; }
-subsection()     { if [[ $TUI_ACTIVE == "yes" ]]; then tui_subsection "$@"; else cli_subsection "$@"; fi; }
-info()           { if [[ $TUI_ACTIVE == "yes" ]]; then tui_info "$@"; else cli_info "$@"; fi; }
-ok()             { if [[ $TUI_ACTIVE == "yes" ]]; then tui_info "$@"; else cli_ok "$@"; fi; }
-warn()           { if [[ $TUI_ACTIVE == "yes" ]]; then tui_warn "$@"; else cli_warn "$@"; fi; }
-die()            { if [[ $TUI_ACTIVE == "yes" ]]; then tui_die "$@"; else cli_die "$@"; fi; }
-run()            { if [[ $TUI_ACTIVE == "yes" ]]; then tui_run "$@"; else cli_run "$@"; fi; }
-choose()         { if [[ $TUI_ACTIVE == "yes" ]]; then tui_choose "$@"; else cli_choose "$@"; fi; }
-choose_multi()   { if [[ $TUI_ACTIVE == "yes" ]]; then tui_choose_multi "$@"; else cli_choose_multi "$@"; fi; }
-ask()            { if [[ $TUI_ACTIVE == "yes" ]]; then tui_ask "$@"; else cli_ask "$@"; fi; }
-ask_yn()         { if [[ $TUI_ACTIVE == "yes" ]]; then tui_ask_yn "$@"; else cli_ask_yn "$@"; fi; }
-ask_password()   { if [[ $TUI_ACTIVE == "yes" ]]; then tui_ask_password "$@"; else cli_ask_password "$@"; fi; }
-pause()          { if [[ $TUI_ACTIVE == "yes" ]]; then tui_pause; else cli_pause; fi; }
-handoff_screen() { if [[ $TUI_ACTIVE == "yes" ]]; then tui_handoff_screen; else cli_handoff_screen; fi; }
-ask_timezone()   { if [[ $TUI_ACTIVE == "yes" ]]; then tui_ask_timezone; else cli_ask_timezone; fi; }
+say()            { if [ "$TUI_ACTIVE" = "yes" ]; then tui_say "$@"; else cli_say "$@"; fi; }
+say_pre()        { if [ "$TUI_ACTIVE" = "yes" ]; then tui_say_pre "$@"; else cli_say_pre "$@"; fi; }
+section()        { if [ "$TUI_ACTIVE" = "yes" ]; then tui_section "$@"; else cli_section "$@"; fi; }
+subsection()     { if [ "$TUI_ACTIVE" = "yes" ]; then tui_subsection "$@"; else cli_subsection "$@"; fi; }
+info()           { if [ "$TUI_ACTIVE" = "yes" ]; then tui_info "$@"; else cli_info "$@"; fi; }
+ok()             { if [ "$TUI_ACTIVE" = "yes" ]; then tui_info "$@"; else cli_ok "$@"; fi; }
+warn()           { if [ "$TUI_ACTIVE" = "yes" ]; then tui_warn "$@"; else cli_warn "$@"; fi; }
+die()            { if [ "$TUI_ACTIVE" = "yes" ]; then tui_die "$@"; else cli_die "$@"; fi; }
+run()            { if [ "$TUI_ACTIVE" = "yes" ]; then tui_run "$@"; else cli_run "$@"; fi; }
+choose()         { if [ "$TUI_ACTIVE" = "yes" ]; then tui_choose "$@"; else cli_choose "$@"; fi; }
+choose_multi()   { if [ "$TUI_ACTIVE" = "yes" ]; then tui_choose_multi "$@"; else cli_choose_multi "$@"; fi; }
+ask()            { if [ "$TUI_ACTIVE" = "yes" ]; then tui_ask "$@"; else cli_ask "$@"; fi; }
+ask_yn()         { if [ "$TUI_ACTIVE" = "yes" ]; then tui_ask_yn "$@"; else cli_ask_yn "$@"; fi; }
+ask_password()   { if [ "$TUI_ACTIVE" = "yes" ]; then tui_ask_password "$@"; else cli_ask_password "$@"; fi; }
+pause()          { if [ "$TUI_ACTIVE" = "yes" ]; then tui_pause; else cli_pause; fi; }
+handoff_screen() { if [ "$TUI_ACTIVE" = "yes" ]; then tui_handoff_screen; else cli_handoff_screen; fi; }
+ask_timezone()   { if [ "$TUI_ACTIVE" = "yes" ]; then tui_ask_timezone; else cli_ask_timezone; fi; }
 
 ui_install_phase() {
     TUI_BUF=""
@@ -570,7 +570,8 @@ tui_refresh_defaults() {
     local key v
     TUI_AUTO="yes"
     for key in sys region hw sw; do
-        if [[ ${SEC_STATE[$key]:-} != "set" ]]; then
+        if [ "${SEC_STATE[$key]:-}" != "set" ]; then
+            # Unquoted on purpose: SEC_VARS holds space separated variable names.
             for v in ${SEC_VARS[$key]}; do printf -v "$v" '%s' ""; done
             "${SEC_FN[$key]}"
             SEC_STATE[$key]="default"
@@ -584,8 +585,8 @@ tui_refresh_defaults() {
 # file on the live system's RAM-backed /tmp, which is deleted right after.
 tui_run_section() {
     local key=$1 fn=${SEC_FN[$1]} tmp rc
-    tmp=$(mktemp /tmp/.gentoo-tui-state.XXXXXX)
-    chmod 600 "$tmp"
+    tmp=$(work_file tui-state)
+    chmod 600 -- "$tmp"
     trap - ERR
     set +e
     (
@@ -602,19 +603,19 @@ tui_run_section() {
     case "$rc" in
         0)
             load_config "$tmp"
-            rm -f "$tmp"
+            rm -f -- "$tmp"
             SEC_STATE[$key]="set"
             tui_refresh_defaults
             return 0 ;;
         10)
-            rm -f "$tmp"
+            rm -f -- "$tmp"
             log "Section ${key}: changes discarded"
             return 1 ;;
         11)
-            rm -f "$tmp"
+            rm -f -- "$tmp"
             tui_quit ;;
         *)
-            rm -f "$tmp"
+            rm -f -- "$tmp"
             exit "$rc" ;;
     esac
 }
@@ -622,21 +623,22 @@ tui_run_section() {
 tui_sec_summary() {
     local n_fp=0 n_pk=0 a
     case "$1" in
-        sys) echo "$(de_label "$DE"), ${INIT}, binary packages: ${USE_BINPKG}" ;;
+        sys) printf '%s\n' "$(de_label "$DE"), ${INIT}, binary packages: ${USE_BINPKG}" ;;
         disk)
-            if [[ ${SEC_STATE[disk]:-} != "set" ]]; then echo "not set yet"; return 0; fi
+            if [ "${SEC_STATE[disk]:-}" != "set" ]; then printf '%s\n' "not set yet"; return 0; fi
             a="whole disk"
-            if [[ $PART_MODE == "manual" ]]; then a="manual"; fi
-            echo "${DISK} (${a}), ${FS}$( [[ $ENCRYPT == yes ]] && echo " + LUKS" ), ${BOOTLOADER}" ;;
-        region) echo "${NEW_HOSTNAME}, ${TIMEZONE}, ${LOCALE}" ;;
+            if [ "$PART_MODE" = "manual" ]; then a="manual"; fi
+            printf '%s\n' "${DISK} (${a}), ${FS}$( [ "$ENCRYPT" = yes ] && printf '%s\n' " + LUKS" ), ${BOOTLOADER}" ;;
+        region) printf '%s\n' "${NEW_HOSTNAME}, ${TIMEZONE}, ${LOCALE}" ;;
         acct)
-            if [[ ${SEC_STATE[acct]:-} != "set" ]]; then echo "not set yet"; return 0; fi
-            echo "${USERNAME} (${PRIV_TOOL}, shell: ${USER_SHELL:-bash})" ;;
-        hw) echo "network: ${NET_TOOL}, graphics: ${GPU_DRIVER}, SSH: ${WANT_SSH}" ;;
+            if [ "${SEC_STATE[acct]:-}" != "set" ]; then printf '%s\n' "not set yet"; return 0; fi
+            printf '%s\n' "${USERNAME} (${PRIV_TOOL}, shell: ${USER_SHELL:-bash})" ;;
+        hw) printf '%s\n' "network: ${NET_TOOL}, graphics: ${GPU_DRIVER}, SSH: ${WANT_SSH}" ;;
         sw)
+            # Unquoted on purpose: both hold space separated names, split to count them.
             for a in $FLATPAK_APPS; do n_fp=$(( n_fp + 1 )); done
             for a in $EXTRA_PKGS; do n_pk=$(( n_pk + 1 )); done
-            echo "Flatpak: ${WANT_FLATPAK} (${n_fp} apps), ${n_pk} native packages" ;;
+            printf '%s\n' "Flatpak: ${WANT_FLATPAK} (${n_fp} apps), ${n_pk} native packages" ;;
     esac
 }
 
@@ -657,40 +659,40 @@ tui_validate() {
     local e gui=0
     CFG_ERRORS=()
     CFG_NOTES=()
-    if [[ ${SEC_STATE[disk]:-} != "set" ]]; then
+    if [ "${SEC_STATE[disk]:-}" != "set" ]; then
         CFG_ERRORS+=("Disk: choose where to install Gentoo (section 2).")
     fi
-    if [[ ${SEC_STATE[acct]:-} != "set" ]]; then
+    if [ "${SEC_STATE[acct]:-}" != "set" ]; then
         CFG_ERRORS+=("Accounts: set the passwords and create your user (section 4).")
     fi
-    if [[ ${SEC_STATE[disk]:-} == "set" ]] && (( $(target_root_gib) < $(min_root_gib) )); then
-        CFG_ERRORS+=("Disk: $( [[ $PART_MODE == manual ]] && echo "${ROOT_PART}" || echo "${DISK}" ) has $(target_root_gib) GiB, but a desktop installation needs at least ${MIN_DESKTOP_DISK_GIB} GiB (section 2, or choose No desktop in section 1).")
+    if [ "${SEC_STATE[disk]:-}" = "set" ] && (( $(target_root_gib) < $(min_root_gib) )); then
+        CFG_ERRORS+=("Disk: $( [ "$PART_MODE" = manual ] && printf '%s\n' "${ROOT_PART}" || printf '%s\n' "${DISK}" ) has $(target_root_gib) GiB, but a desktop installation needs at least ${MIN_DESKTOP_DISK_GIB} GiB (section 2, or choose No desktop in section 1).")
     fi
-    if [[ ${SEC_STATE[disk]:-} == "set" && $ENCRYPT == "yes" && -z $LUKS_PASSWORD ]]; then
+    if [ "${SEC_STATE[disk]:-}" = "set" ] && [ "$ENCRYPT" = "yes" ] && [ -z "$LUKS_PASSWORD" ]; then
         CFG_ERRORS+=("Disk: encryption is on but no passphrase is set (section 2).")
     fi
-    if [[ $NET_TOOL == "networkd" && $INIT != "systemd" ]]; then
+    if [ "$NET_TOOL" = "networkd" ] && [ "$INIT" != "systemd" ]; then
         CFG_ERRORS+=("Network: systemd-networkd needs systemd, but OpenRC is selected. Change the network manager (section 5) or the init system (section 1).")
     fi
-    if [[ $DE != "none" && -z $XKB_LAYOUT ]]; then
+    if [ "$DE" != "none" ] && [ -z "$XKB_LAYOUT" ]; then
         xkb_from_keymap "$KEYMAP"
         CFG_NOTES+=("The desktop keyboard layout was set to '${XKB_LAYOUT}' from the console keymap. Change it in section 3 if needed.")
     fi
-    if [[ $DE == "none" ]]; then
-        if [[ $WANT_FLATPAK == "yes" ]]; then
+    if [ "$DE" = "none" ]; then
+        if [ "$WANT_FLATPAK" = "yes" ]; then
             CFG_NOTES+=("Flatpak is selected although there is no desktop; Flatpak apps are mostly graphical (section 6).")
         fi
-        if [[ $WANT_CUPS == "yes" ]]; then
+        if [ "$WANT_CUPS" = "yes" ]; then
             CFG_NOTES+=("Printing (CUPS) is selected although there is no desktop (section 5).")
         fi
         for e in "${NATIVE_GUI_APPS[@]}"; do
-            if [[ " $EXTRA_PKGS " == *" ${e%%|*} "* ]]; then gui=$(( gui + 1 )); fi
+            if [[ " $EXTRA_PKGS " = *" ${e%%|*} "* ]]; then gui=$(( gui + 1 )); fi
         done
         if (( gui > 0 )); then
             CFG_NOTES+=("${gui} graphical application(s) are selected although there is no desktop (section 6).")
         fi
     fi
-    if [[ $HAS_WIFI == "yes" && $NET_TOOL != "networkmanager" ]]; then
+    if [ "$HAS_WIFI" = "yes" ] && [ "$NET_TOOL" != "networkmanager" ]; then
         CFG_NOTES+=("This machine has Wi-Fi, but ${NET_TOOL} only sets up wired networking (section 5).")
     fi
 }
@@ -699,7 +701,7 @@ tui_review() {
     local tmp C_RED="" C_RESET="" C_BOLD=""
     tui_validate
     compute_derived
-    tmp=$(mktemp)
+    tmp=$(work_file review)
     {
         print_summary
         if (( ${#CFG_ERRORS[@]} > 0 )); then
@@ -714,7 +716,7 @@ tui_review() {
     TUI_TITLE="Review all settings"
     tui_dims
     tui_call "${TUI_SCROLL[@]}" --textbox "$tmp" "$TUI_MAXH" "$TUI_BOXW" || true
-    rm -f "$tmp"
+    rm -f -- "$tmp"
 }
 
 tui_install_confirm() {
@@ -726,7 +728,7 @@ tui_install_confirm() {
         return 1
     fi
     tui_review
-    if [[ $PART_MODE == "auto" ]]; then
+    if [ "$PART_MODE" = "auto" ]; then
         what="EVERY partition and file on ${DISK} will be permanently deleted."
     else
         word="FORMAT"
@@ -740,7 +742,7 @@ tui_install_confirm() {
     if ! tui_call --inputbox "Last check. ${what}"$'\n\n'"Type ${word} in capital letters to start:" 11 "$TUI_BOXW" ""; then
         return 1
     fi
-    if [[ $(trim "$TUI_OUT") != "$word" ]]; then
+    if [ "$(trim "$TUI_OUT")" != "$word" ]; then
         tui_show "Not confirmed. Nothing was changed."
         return 1
     fi
@@ -749,12 +751,12 @@ tui_install_confirm() {
 
 tui_next_item() {
     case "$1" in
-        sys) echo "disk" ;;
-        disk) echo "region" ;;
-        region) echo "acct" ;;
-        acct) echo "hw" ;;
-        hw) echo "sw" ;;
-        *) echo "review" ;;
+        sys) printf '%s\n' "disk" ;;
+        disk) printf '%s\n' "region" ;;
+        region) printf '%s\n' "acct" ;;
+        acct) printf '%s\n' "hw" ;;
+        hw) printf '%s\n' "sw" ;;
+        *) printf '%s\n' "review" ;;
     esac
 }
 
@@ -842,17 +844,16 @@ tui_install() {
 
 tui_fresh_install() {
     live_preflight
-    rm -f /tmp/.gentoo-tui-state.* 2>/dev/null || true
     : >"$LOG"
-    log "gentoo-install-tui.sh ${SCRIPT_VERSION} started"
+    log "gentoo_install_tui.sh ${SCRIPT_VERSION} started"
     init_defaults
     tui_init
     TUI_ACTIVE="yes"
     tui_welcome
     live_keyboard
+    detect_hardware
     network_step
     sync_clock
-    detect_hardware
     show_hardware
     mac_boot_check
     tui_refresh_defaults

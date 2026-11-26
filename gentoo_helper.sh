@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  gentoo-helper - simple menus for everyday Gentoo package management
+#  gentoo_helper - simple menus for everyday Gentoo package management
 # =============================================================================
 #
 #  Install, remove and find software, update the whole system and keep it
@@ -8,27 +8,28 @@
 #  what is going to happen in plain words and asks before changing anything.
 #
 #  Install it:
-#    curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-helper.sh
-#    sudo install -m 755 gentoo-helper.sh /usr/local/bin/gentoo-helper
+#    curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo_helper.sh
+#    sudo install -m 755 gentoo_helper.sh /usr/local/bin/gentoo_helper
 #
 #  Use it:
-#    gentoo-helper                  menus
-#    gentoo-helper update           update the whole system
-#    gentoo-helper install NAME     find and install a package
-#    gentoo-helper remove NAME      remove a package
-#    gentoo-helper clean            remove unneeded packages, free disk space
-#    gentoo-helper news             read Gentoo news
-#    gentoo-helper configs          review configuration file updates
-#    gentoo-helper flatpak          Flatpak apps
-#    gentoo-helper tasks            common tasks: printing, Wi-Fi, drivers, SSH, ...
-#    gentoo-helper help             this text
+#    gentoo_helper                  menus
+#    gentoo_helper update           update the whole system
+#    gentoo_helper install NAME     find and install a package
+#    gentoo_helper remove NAME      remove a package
+#    gentoo_helper clean            remove unneeded packages, free disk space
+#    gentoo_helper news             read Gentoo news
+#    gentoo_helper configs          review configuration file updates
+#    gentoo_helper flatpak          Flatpak apps
+#    gentoo_helper tasks            common tasks: printing, Wi-Fi, drivers, SSH, ...
+#    gentoo_helper -h               this text
+#    gentoo_helper -V               version
 #
-#  Log: /var/log/gentoo-helper.log
+#  Needs bash 4.4 or newer. Log: /var/log/gentoo-helper.log
 # =============================================================================
 
-set -uo pipefail
+set -euo pipefail
 
-readonly VERSION="1.3.0"
+readonly VERSION="1.4.0"
 readonly LOG="/var/log/gentoo-helper.log"
 readonly STATE_DIR="/var/lib/gentoo-helper"
 readonly LAST_FAILURE="/var/log/gentoo-helper-last-failure.txt"
@@ -59,7 +60,7 @@ UI_BACK_LABEL="Back"
 WORK_DIR=""
 SR_NAME=(); SR_INST=(); SR_LATEST=(); SR_DESC=()
 
-if [[ -t 1 ]]; then
+if [ -t 1 ]; then
     C_RESET=$'\e[0m'; C_BOLD=$'\e[1m'; C_GREEN=$'\e[1;32m'; C_YELLOW=$'\e[1;33m'; C_BLUE=$'\e[1;34m'
 else
     C_RESET=""; C_BOLD=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""
@@ -83,9 +84,9 @@ trim() {
 
 term_width() {
     local w
-    w=$(tput cols 2>/dev/null || echo 80)
+    w=$(tput cols 2>/dev/null || printf '%s\n' 80)
     [[ $w =~ ^[0-9]+$ ]] || w=80
-    echo $(( w > 100 ? 100 : (w < 50 ? 50 : w) ))
+    printf '%s\n' $(( w > 100 ? 100 : (w < 50 ? 50 : w) ))
 }
 
 clear_screen() {
@@ -107,11 +108,54 @@ pause_text() {
 }
 
 tmpfile() {
-    mktemp "${WORK_DIR}/XXXXXX"
+    mktemp "${WORK_DIR}/tmp.XXXXXX"
+}
+
+# self_path: the absolute path of this script, without GNU readlink -f.
+self_path() {
+    local dir base
+    dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    base=$(basename -- "${BASH_SOURCE[0]}")
+    printf '%s/%s\n' "$dir" "$base"
+}
+
+# file_mtime FILE: modification time in seconds since 1970. stat's options
+# differ between GNU, BSD and BusyBox, so this asks Python, which Portage
+# always has.
+file_mtime() {
+    python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$1" 2>/dev/null
+}
+
+# sed_inplace SCRIPT FILE: edit FILE with sed, portably (no GNU sed -i).
+sed_inplace() {
+    local script=$1 file=$2 tmp
+    tmp=$(mktemp "${file}.XXXXXX")
+    if sed "$script" "$file" >"$tmp"; then
+        cat -- "$tmp" >"$file"
+        rm -f -- "$tmp"
+    else
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
+# strip_colors: remove terminal colour codes from standard input
+# (portable: no \x escapes in the sed script).
+strip_colors() {
+    local esc
+    esc=$(printf '\033')
+    sed "s/${esc}\[[0-9;]*m//g"
+}
+
+# clear_dir DIR: delete everything inside DIR, keeping DIR itself.
+clear_dir() {
+    if [ -d "$1" ]; then
+        find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    fi
 }
 
 cleanup() {
-    if [[ -n $WORK_DIR && -d $WORK_DIR ]]; then rm -rf "$WORK_DIR"; fi
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then rm -rf -- "$WORK_DIR"; fi
 }
 
 # ----------------------------------------------------------------------------
@@ -119,8 +163,8 @@ cleanup() {
 # ----------------------------------------------------------------------------
 ui_dims() {
     local h w
-    h=$(tput lines 2>/dev/null || echo 24)
-    w=$(tput cols 2>/dev/null || echo 80)
+    h=$(tput lines 2>/dev/null || printf '%s\n' 24)
+    w=$(tput cols 2>/dev/null || printf '%s\n' 80)
     [[ $h =~ ^[0-9]+$ ]] || h=24
     [[ $w =~ ^[0-9]+$ ]] || w=80
     UI_MAXH=$(( h - 4 ))
@@ -141,11 +185,11 @@ dlg() {
     OUT=$(dialog --cr-wrap --no-collapse \
         --backtitle "Gentoo Helper ${VERSION}   |   Arrows: move   Space: tick   Enter: choose   Esc: back" \
         --title " ${TITLE} " "$@" 3>&1 1>&2 2>&3) || rc=$?
-    if (( rc != 0 )) && { [[ -n $OUT ]] || (( rc != 1 && rc != 255 )); }; then
+    if (( rc != 0 )) && { [ -n "$OUT" ] || (( rc != 1 && rc != 255 )); }; then
         log "dialog failed (rc=${rc}): ${OUT}"
         UI="text"
         clear_screen
-        echo "The menu program failed (${OUT:-exit code ${rc}}). Switching to plain text menus."
+        printf '%s\n' "The menu program failed (${OUT:-exit code ${rc}}). Switching to plain text menus."
         return 99
     fi
     return "$rc"
@@ -165,7 +209,7 @@ ui_menu() {
     shift 2
     local -a items=("$@")
     local n=$(( ${#items[@]} / 2 )) rc i
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local maxl=20 lines lh h w
         ui_dims
         for (( i = 1; i < ${#items[@]}; i += 2 )); do
@@ -179,10 +223,10 @@ ui_menu() {
         lh=$(( lh < 3 ? 3 : lh ))
         h=$(( lines + lh + 7 ))
         h=$(( h > UI_MAXH ? UI_MAXH : h ))
+        rc=0
         dlg --no-tags --cancel-label "$UI_BACK_LABEL" --default-item "$def" \
-            --menu "$text" "$h" "$w" "$lh" "${items[@]}"
-        rc=$?
-        if (( rc == 99 )); then ui_menu "$text" "$def" "${items[@]}"; return $?; fi
+            --menu "$text" "$h" "$w" "$lh" "${items[@]}" || rc=$?
+        if (( rc == 99 )); then ui_menu "$text" "$def" "${items[@]}" && return 0; return 1; fi
         if (( rc == 0 )); then CHOICE=$OUT; return 0; fi
         return 1
     fi
@@ -190,53 +234,53 @@ ui_menu() {
     local -a tags=()
     text_header
     say "$text"
-    echo
+    printf '\n'
     for (( i = 0; i < ${#items[@]}; i += 2 )); do
         num=$(( num + 1 ))
         tags+=("${items[i]}")
-        if [[ ${items[i]} == "$def" ]]; then defnum=$num; fi
+        if [ "${items[i]}" = "$def" ]; then defnum=$num; fi
         printf '  %2d) %s\n' "$num" "${items[i+1]}"
     done
     printf '   0) %s\n' "$UI_BACK_LABEL"
     while true; do
-        if ! read -r -p "  Choose a number [${defnum}]: " a; then echo; return 1; fi
+        if ! read -r -p "  Choose a number [${defnum}]: " a; then printf '\n'; return 1; fi
         a=$(trim "${a:-$defnum}")
-        if [[ $a == "0" ]]; then return 1; fi
+        if [ "$a" = "0" ]; then return 1; fi
         if [[ $a =~ ^[0-9]+$ ]] && (( a >= 1 && a <= num )); then
             CHOICE=${tags[a-1]}
             return 0
         fi
-        echo "  Please enter a number from the list."
+        printf '%s\n' "  Please enter a number from the list."
     done
 }
 
 # ui_yesno "text" [y|n]  ->  returns 0 for yes
 ui_yesno() {
     local text=$1 def=${2:-y} rc a hint="Y/n"
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local lines h
         local -a extra=()
         ui_dims
-        if [[ $def == "n" ]]; then extra=(--defaultno); fi
+        if [ "$def" = "n" ]; then extra=(--defaultno); fi
         lines=$(text_lines "$text" $(( UI_W - 4 )))
         h=$(( lines + 6 ))
         h=$(( h > UI_MAXH ? UI_MAXH : h ))
-        dlg "${extra[@]}" --yesno "$text" "$h" "$UI_W"
-        rc=$?
-        if (( rc == 99 )); then ui_yesno "$text" "$def"; return $?; fi
+        rc=0
+        dlg "${extra[@]}" --yesno "$text" "$h" "$UI_W" || rc=$?
+        if (( rc == 99 )); then ui_yesno "$text" "$def" && return 0; return 1; fi
         return $(( rc == 0 ? 0 : 1 ))
     fi
-    if [[ $def == "n" ]]; then hint="y/N"; fi
-    echo
+    if [ "$def" = "n" ]; then hint="y/N"; fi
+    printf '\n'
     say "$text"
     while true; do
-        if ! read -r -p "  [${hint}]: " a; then echo; return 1; fi
+        if ! read -r -p "  [${hint}]: " a; then printf '\n'; return 1; fi
         a=$(trim "${a:-$def}")
         case "${a,,}" in
             y|yes) return 0 ;;
             n|no) return 1 ;;
         esac
-        echo "  Please answer y or n."
+        printf '%s\n' "  Please answer y or n."
     done
 }
 
@@ -247,7 +291,7 @@ ui_checklist() {
     shift
     local -a items=("$@")
     local n=$(( ${#items[@]} / 3 ))
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local maxl=20 lines lh h w
         ui_dims
         for (( i = 1; i < ${#items[@]}; i += 3 )); do
@@ -262,9 +306,9 @@ ui_checklist() {
         lh=$(( lh < 3 ? 3 : lh ))
         h=$(( lines + lh + 7 ))
         h=$(( h > UI_MAXH ? UI_MAXH : h ))
-        dlg --separate-output --no-tags --cancel-label "Back" --checklist "$text" "$h" "$w" "$lh" "${items[@]}"
-        rc=$?
-        if (( rc == 99 )); then ui_checklist "$1" "${items[@]}"; return $?; fi
+        rc=0
+        dlg --separate-output --no-tags --cancel-label "Back" --checklist "$text" "$h" "$w" "$lh" "${items[@]}" || rc=$?
+        if (( rc == 99 )); then ui_checklist "$1" "${items[@]}" && return 0; return 1; fi
         if (( rc != 0 )); then return 1; fi
         CHOICE=$(trim "$(tr '\n' ' ' <<<"$OUT")")
         return 0
@@ -277,27 +321,27 @@ ui_checklist() {
     while true; do
         text_header
         say "$text"
-        echo
+        printf '\n'
         for (( i = 0; i < n; i++ )); do
-            if [[ ${state[i]} == "on" ]]; then t="x"; else t=" "; fi
+            if [ "${state[i]}" = "on" ]; then t="x"; else t=" "; fi
             printf '  %2d) [%s] %s\n' $(( i + 1 )) "$t" "${items[i*3+1]}"
         done
-        echo
-        if ! read -r -p "  Numbers to tick/untick (e.g. 2 4), Enter to continue, 0 to go back: " a; then echo; return 1; fi
+        printf '\n'
+        if ! read -r -p "  Numbers to tick/untick (e.g. 2 4), Enter to continue, 0 to go back: " a; then printf '\n'; return 1; fi
         a=$(trim "$a")
-        if [[ -z $a ]]; then break; fi
-        if [[ $a == "0" ]]; then return 1; fi
+        if [ -z "$a" ]; then break; fi
+        if [ "$a" = "0" ]; then return 1; fi
         local -a picks=()
         read -ra picks <<<"$a"
         for t in "${picks[@]}"; do
             if [[ $t =~ ^[0-9]+$ ]] && (( t >= 1 && t <= n )); then
-                if [[ ${state[t-1]} == "on" ]]; then state[t-1]="off"; else state[t-1]="on"; fi
+                if [ "${state[t-1]}" = "on" ]; then state[t-1]="off"; else state[t-1]="on"; fi
             fi
         done
     done
     CHOICE=""
     for (( i = 0; i < n; i++ )); do
-        if [[ ${state[i]} == "on" ]]; then CHOICE+="${CHOICE:+ }${tags[i]}"; fi
+        if [ "${state[i]}" = "on" ]; then CHOICE+="${CHOICE:+ }${tags[i]}"; fi
     done
     return 0
 }
@@ -305,42 +349,42 @@ ui_checklist() {
 # ui_input "text" "default"  ->  CHOICE. Returns 1 when cancelled or left empty.
 ui_input() {
     local text=$1 def=${2:-} rc a
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local lines h
         ui_dims
         lines=$(text_lines "$text" $(( UI_W - 4 )))
         h=$(( lines + 8 ))
         h=$(( h > UI_MAXH ? UI_MAXH : h ))
-        dlg --inputbox "$text" "$h" "$UI_W" "$def"
-        rc=$?
-        if (( rc == 99 )); then ui_input "$text" "$def"; return $?; fi
+        rc=0
+        dlg --inputbox "$text" "$h" "$UI_W" "$def" || rc=$?
+        if (( rc == 99 )); then ui_input "$text" "$def" && return 0; return 1; fi
         if (( rc != 0 )); then return 1; fi
         CHOICE=$(trim "$OUT")
     else
-        echo
+        printf '\n'
         say "$text" "(Leave empty to go back.)"
-        if ! read -r -p "  > " a; then echo; return 1; fi
+        if ! read -r -p "  > " a; then printf '\n'; return 1; fi
         CHOICE=$(trim "${a:-$def}")
     fi
-    [[ -n $CHOICE ]]
+    [ -n "$CHOICE" ]
 }
 
 # ui_file FILE: show a (long) text file, scrollable
 ui_file() {
     local f=$1 rc
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         ui_dims
         local wrapped
         wrapped=$(tmpfile)
         fold -s -w $(( UI_W - 4 )) "$f" >"$wrapped"
-        dlg --exit-label "OK" --textbox "$wrapped" "$UI_MAXH" "$UI_W"
-        rc=$?
+        rc=0
+        dlg --exit-label "OK" --textbox "$wrapped" "$UI_MAXH" "$UI_W" || rc=$?
         if (( rc == 99 )); then ui_file "$f"; fi
         return 0
     fi
-    echo
-    if have less && (( $(wc -l <"$f") > 20 )); then
-        less -R "$f"
+    printf '\n'
+    if have less && [ "$(wc -l <"$f")" -gt 20 ]; then
+        less -R "$f" || true
     else
         sed 's/^/  /' "$f"
         pause_text
@@ -350,7 +394,7 @@ ui_file() {
 # ui_msg "text": a message box (scrollable when long)
 ui_msg() {
     local text=$1 rc
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local lines
         ui_dims
         lines=$(text_lines "$text" $(( UI_W - 4 )))
@@ -361,24 +405,24 @@ ui_msg() {
             ui_file "$f"
             return 0
         fi
-        dlg --msgbox "$text" $(( lines + 6 )) "$UI_W"
-        rc=$?
+        rc=0
+        dlg --msgbox "$text" $(( lines + 6 )) "$UI_W" || rc=$?
         if (( rc == 99 )); then ui_msg "$text"; fi
         return 0
     fi
-    echo
+    printf '\n'
     say "$text"
     pause_text
 }
 
 # busy "text": a short "please wait" note while something runs
 busy() {
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         ui_dims
         dialog --backtitle "Gentoo Helper ${VERSION}" --title " ${TITLE} " \
             --infobox "$1" $(( $(text_lines "$1" $(( UI_W - 4 ))) + 4 )) "$UI_W" 2>/dev/null || true
     else
-        echo
+        printf '\n'
         say "$1"
     fi
 }
@@ -392,10 +436,10 @@ run_visible() {
     clear_screen
     printf '%s==>%s %s\n\n' "$C_GREEN" "$C_RESET" "$*"
     log "RUN: $*"
-    "$@" 2>&1 | tee -a "$LOG"
-    local rc=${PIPESTATUS[0]}
+    local rc=0
+    "$@" 2>&1 | tee -a "$LOG" || rc=${PIPESTATUS[0]}
     log "EXIT ${rc}: $*"
-    echo
+    printf '\n'
     return "$rc"
 }
 
@@ -407,10 +451,10 @@ run_emerge() {
     printf '%s==>%s emerge %s\n' "$C_GREEN" "$C_RESET" "$*"
     printf '    Compiler output goes to each package'"'"'s build log; progress is shown here.\n\n'
     log "RUN: emerge ${RUN_OPTS[*]} $*"
-    emerge "${RUN_OPTS[@]}" "$@" 2>&1 | tee -a "$LOG" "$RUN_TMP"
-    rc=${PIPESTATUS[0]}
+    rc=0
+    emerge "${RUN_OPTS[@]}" "$@" 2>&1 | tee -a "$LOG" "$RUN_TMP" || rc=${PIPESTATUS[0]}
     log "EXIT ${rc}: emerge $*"
-    echo
+    printf '\n'
     if (( rc == 0 )); then
         printf '%sDone.%s\n' "$C_GREEN" "$C_RESET"
         pause_text
@@ -429,48 +473,48 @@ failure_help() {
     blog=${blog#*located at \'}
     blog=${blog%\'}
     {
-        echo "WHAT WENT WRONG"
-        echo "==============="
-        echo
+        printf '%s\n' "WHAT WENT WRONG"
+        printf '%s\n' "==============="
+        printf '\n'
         if grep -q "No space left on device" "$RUN_TMP" "${blog:-/dev/null}" 2>/dev/null; then
-            echo "* The disk is full. Use 'Maintenance > Free disk space', then try again."
-            echo
+            printf '%s\n' "* The disk is full. Use 'Maintenance > Free disk space', then try again."
+            printf '\n'
         fi
         if grep -qE "Couldn't download|Fetch failed|Unable to download|Could not resolve host" "$RUN_TMP" 2>/dev/null; then
-            echo "* A download failed. Check the internet connection and try again; mirrors"
-            echo "  are sometimes briefly unavailable."
-            echo
+            printf '%s\n' "* A download failed. Check the internet connection and try again; mirrors"
+            printf '%s\n' "  are sometimes briefly unavailable."
+            printf '\n'
         fi
-        if [[ -n $blog && -r $blog ]]; then
+        if [ -n "$blog" ] && [ -r "$blog" ]; then
             if grep -q "Can't locate .*\.pm in @INC" "$blog" 2>/dev/null; then
-                echo "* A Perl module could not be loaded, which usually happens after a Perl"
-                echo "  upgrade. Use 'Maintenance > Rebuild Perl modules', then try again."
-                echo
+                printf '%s\n' "* A Perl module could not be loaded, which usually happens after a Perl"
+                printf '%s\n' "  upgrade. Use 'Maintenance > Rebuild Perl modules', then try again."
+                printf '\n'
             fi
             errors=$(grep -nE "\*\*\* \[|error:|Error [0-9]+|Can't locate|No such file or directory|Illegal instruction|Segmentation fault|Killed|undefined reference|command not found" "$blog" 2>/dev/null \
                 | grep -vE "^[0-9]+:(checking|configure:)|-Werror|-Wno-error" || true)
             first=${errors%%:*}
-            echo "The package's build log: ${blog}"
+            printf '%s\n' "The package's build log: ${blog}"
             if [[ $first =~ ^[0-9]+$ ]]; then
                 from=$(( first > 12 ? first - 12 : 1 ))
-                echo
-                echo "Where it first went wrong (the cause is usually just above the first"
-                echo "line with '***' or 'error'):"
-                echo
+                printf '\n'
+                printf '%s\n' "Where it first went wrong (the cause is usually just above the first"
+                printf '%s\n' "line with '***' or 'error'):"
+                printf '\n'
                 sed -n "${from},$(( first + 3 ))p" "$blog"
             fi
-            echo
-            echo "Last lines of the build log:"
-            echo
+            printf '\n'
+            printf '%s\n' "Last lines of the build log:"
+            printf '\n'
             tail -n 25 "$blog"
         else
-            echo "Last lines of emerge's output:"
-            echo
+            printf '%s\n' "Last lines of emerge's output:"
+            printf '\n'
             tail -n 40 "$RUN_TMP"
         fi
-        echo
-        echo "This report is saved as ${LAST_FAILURE}. If you ask for help (for example"
-        echo "on forums.gentoo.org), include it together with the output of: emerge --info"
+        printf '\n'
+        printf '%s\n' "This report is saved as ${LAST_FAILURE}. If you ask for help (for example"
+        printf '%s\n' "on forums.gentoo.org), include it together with the output of: emerge --info"
     } >"$LAST_FAILURE"
     TITLE="What went wrong"
     ui_file "$LAST_FAILURE"
@@ -483,8 +527,8 @@ failure_help() {
 # make_plan ARGS...: calculate (without changing anything) into PLAN_OUT/PLAN_RC
 make_plan() {
     busy "Working out what needs to be done. This can take a minute..."
-    PLAN_OUT=$(emerge "${PLAN_OPTS[@]}" "$@" 2>&1)
-    PLAN_RC=$?
+    PLAN_RC=0
+    PLAN_OUT=$(emerge "${PLAN_OPTS[@]}" "$@" 2>&1) || PLAN_RC=$?
     log "PLAN rc=${PLAN_RC}: emerge $*"
     printf '%s\n' "$PLAN_OUT" >>"$LOG" 2>/dev/null || true
 }
@@ -514,7 +558,7 @@ plan_list() {
 count_lines() {
     local c
     c=$(grep -c "$1" <<<"$PLAN_OUT" || true)
-    echo "${c:-0}"
+    printf '%s\n' "${c:-0}"
 }
 
 # confirm_plan "what this is": show the plan and ask. Returns 1 when the user
@@ -522,14 +566,14 @@ count_lines() {
 confirm_plan() {
     local what=$1 list nbin nsrc total text f
     list=$(plan_list)
-    if [[ -z $list ]]; then return 3; fi
+    if [ -z "$list" ]; then return 3; fi
     nbin=$(count_lines '^\[binary')
     nsrc=$(count_lines '^\[ebuild')
     total=$(grep -m1 '^Total:' <<<"$PLAN_OUT" || true)
     text="${what}"$'\n\n'"Packages: $(( nbin + nsrc ))"$'\n'
     text+="  ready-made (downloaded, installs quickly): ${nbin}"$'\n'
     text+="  compiled on this computer:                 ${nsrc}"$'\n'
-    if [[ -n $total ]]; then text+=$'\n'"Portage's summary: ${total}"$'\n'; fi
+    if [ -n "$total" ]; then text+=$'\n'"Portage's summary: ${total}"$'\n'; fi
     if (( nsrc > 0 )); then
         text+=$'\n'"Compiling takes from under a minute for small packages to hours for big ones (web browsers, office suites, compilers). You can keep using the computer meanwhile."$'\n'
     fi
@@ -541,8 +585,8 @@ confirm_plan() {
     fi
     f=$(tmpfile)
     {
-        echo "How      What       Package"
-        echo "$list"
+        printf '%s\n' "How      What       Package"
+        printf '%s\n' "$list"
     } >"$f"
     while true; do
         if ! ui_menu "$text" "go" go "Start" list "Show the list of packages" cancel "Cancel"; then return 1; fi
@@ -567,16 +611,16 @@ extract_changes() {
 add_settings() {
     local file=$1 lines=$2 reason=$3 dir line existing="" new=""
     dir=${file%/*}
-    if [[ -f $dir ]]; then file=$dir; fi
-    if [[ ! -e $dir ]]; then mkdir -p "$dir"; fi
-    if [[ -f $file ]]; then existing=$(<"$file"); fi
+    if [ -f "$dir" ]; then file=$dir; fi
+    if [ ! -e "$dir" ]; then mkdir -p -- "$dir"; fi
+    if [ -f "$file" ]; then existing=$(<"$file"); fi
     while IFS= read -r line; do
         line=$(trim "$line")
-        if [[ -z $line ]]; then continue; fi
+        if [ -z "$line" ]; then continue; fi
         if ! grep -qxF -- "$line" <<<"$existing"; then new+="${line}"$'\n'; fi
     done <<<"$lines"
-    if [[ -z $new ]]; then return 0; fi
-    printf '\n# Added by gentoo-helper on %s: %s\n%s' "$(date '+%Y-%m-%d')" "$reason" "$new" >>"$file"
+    if [ -z "$new" ]; then return 0; fi
+    printf '\n# Added by gentoo_helper on %s: %s\n%s' "$(date '+%Y-%m-%d')" "$reason" "$new" >>"$file"
     log "Added to ${file}: ${new}"
 }
 
@@ -588,23 +632,23 @@ handle_plan_failure() {
     lic=$(extract_changes "license")
     kw=$(extract_changes "keyword")
     mask=$(extract_changes "mask")
-    if [[ -n $use || -n $lic || -n $kw ]]; then
+    if [ -n "$use" ] || [ -n "$lic" ] || [ -n "$kw" ]; then
         text="To go ahead, Portage needs some settings changed first:"$'\n'
-        if [[ -n $use ]]; then
+        if [ -n "$use" ]; then
             text+=$'\n'"Package options (USE flags) to turn on or off:"$'\n'"${use}"$'\n'"These switch on features that a package needs. Accepting them is normally safe."$'\n'
         fi
-        if [[ -n $lic ]]; then
+        if [ -n "$lic" ]; then
             text+=$'\n'"Licences to accept:"$'\n'"${lic}"$'\n'"These packages are not free software (or use an unusual licence), so their licence must be accepted explicitly."$'\n'
         fi
-        if [[ -n $kw ]]; then
+        if [ -n "$kw" ]; then
             def="n"
             text+=$'\n'"Testing versions to allow:"$'\n'"${kw}"$'\n'"The version needed is still marked as 'testing' (~amd64) on Gentoo. Testing versions usually work but have had less testing than stable ones. Only accept if you really want this."$'\n'
         fi
         text+=$'\n'"Save these settings and try again? They are saved in files named zz-gentoo-helper under /etc/portage, and can be reviewed or removed any time under 'Maintenance > Settings added by this helper'."
         if ui_yesno "$text" "$def"; then
-            if [[ -n $use ]]; then add_settings "$USE_FILE" "$use" "$reason"; fi
-            if [[ -n $lic ]]; then add_settings "$LICENSE_FILE" "$lic" "$reason"; fi
-            if [[ -n $kw ]]; then add_settings "$KEYWORDS_FILE" "$kw" "$reason"; fi
+            if [ -n "$use" ]; then add_settings "$USE_FILE" "$use" "$reason"; fi
+            if [ -n "$lic" ]; then add_settings "$LICENSE_FILE" "$lic" "$reason"; fi
+            if [ -n "$kw" ]; then add_settings "$KEYWORDS_FILE" "$kw" "$reason"; fi
             return 0
         fi
         return 1
@@ -615,17 +659,17 @@ handle_plan_failure() {
     fi
     f=$(tmpfile)
     {
-        if [[ -n $mask ]] || grep -q "have been masked" <<<"$PLAN_OUT"; then
-            echo "The package (or something it needs) is MASKED: Gentoo has blocked it,"
-            echo "usually because it is broken, insecure, or about to be removed. The"
-            echo "reason is shown below. This helper does not unmask packages."
+        if [ -n "$mask" ] || grep -q "have been masked" <<<"$PLAN_OUT"; then
+            printf '%s\n' "The package (or something it needs) is MASKED: Gentoo has blocked it,"
+            printf '%s\n' "usually because it is broken, insecure, or about to be removed. The"
+            printf '%s\n' "reason is shown below. This helper does not unmask packages."
         else
-            echo "Portage cannot work out how to do this. Its own explanation is below."
-            echo "Conflicts like this often go away after the next system update; if not,"
-            echo "search forums.gentoo.org for the package names mentioned."
+            printf '%s\n' "Portage cannot work out how to do this. Its own explanation is below."
+            printf '%s\n' "Conflicts like this often go away after the next system update; if not,"
+            printf '%s\n' "search forums.gentoo.org for the package names mentioned."
         fi
-        echo
-        echo "----------------------------------------------------------------------"
+        printf '\n'
+        printf '%s\n' "----------------------------------------------------------------------"
         printf '%s\n' "$PLAN_OUT"
     } >"$f"
     TITLE="Portage could not make a plan"
@@ -644,8 +688,8 @@ plan_and_run() {
         if (( PLAN_RC == 0 )); then break; fi
         if (( round == 4 )) || ! handle_plan_failure "$what"; then return 1; fi
     done
-    confirm_plan "$what"
-    rc=$?
+    rc=0
+    confirm_plan "$what" || rc=$?
     if (( rc == 3 )); then return 3; fi
     if (( rc != 0 )); then return 1; fi
     if run_emerge "$@"; then return 0; fi
@@ -657,8 +701,8 @@ plan_and_run() {
 install_packages() {
     local what=$1 rc
     shift
-    plan_and_run "$what" --noreplace "$@"
-    rc=$?
+    rc=0
+    plan_and_run "$what" --noreplace "$@" || rc=$?
     if (( rc == 0 || rc == 3 )); then return 0; fi
     return 1
 }
@@ -666,38 +710,49 @@ install_packages() {
 # ----------------------------------------------------------------------------
 # Status
 # ----------------------------------------------------------------------------
+# Days since the package repository was synced (-1 if unknown).
+# metadata/timestamp.x starts with the snapshot time in seconds; otherwise the
+# file times are used.
 sync_age_days() {
-    local f="${REPO_DIR}/metadata/timestamp.chk" ts=""
-    if [[ -r $f ]]; then ts=$(date -d "$(head -n1 "$f")" +%s 2>/dev/null || stat -c %Y "$f" 2>/dev/null || true); fi
-    if [[ -z $ts ]]; then ts=$(stat -c %Y "$REPO_DIR" 2>/dev/null || true); fi
-    if [[ ! $ts =~ ^[0-9]+$ ]]; then echo "-1"; return 0; fi
-    echo $(( ($(date +%s) - ts) / 86400 ))
+    local ts=""
+    if [ -r "${REPO_DIR}/metadata/timestamp.x" ]; then
+        ts=$(awk 'NR == 1 {print $1}' "${REPO_DIR}/metadata/timestamp.x" 2>/dev/null || true)
+    fi
+    if [[ ! $ts =~ ^[0-9]+$ ]]; then ts=$(file_mtime "${REPO_DIR}/metadata/timestamp.chk" || true); fi
+    if [[ ! $ts =~ ^[0-9]+$ ]]; then ts=$(file_mtime "$REPO_DIR" || true); fi
+    if [[ ! $ts =~ ^[0-9]+$ ]]; then printf '%s\n' "-1"; return 0; fi
+    printf '%s\n' "$(( ($(date +%s) - ts) / 86400 ))"
 }
 
 news_count() {
     local n
-    n=$(eselect news count new 2>/dev/null || echo 0)
+    n=$(eselect news count new 2>/dev/null || printf '%s\n' 0)
     [[ $n =~ ^[0-9]+$ ]] || n=0
-    echo "$n"
+    printf '%s\n' "$n"
 }
 
 pending_configs() {
     local p
     local -a paths=()
-    read -ra paths <<<"$(portageq envvar CONFIG_PROTECT 2>/dev/null || echo /etc)"
+    read -ra paths <<<"$(portageq envvar CONFIG_PROTECT 2>/dev/null || printf '%s\n' /etc)"
     for p in "${paths[@]}"; do
-        if [[ -e $p ]]; then find "$p" -name '._cfg[0-9][0-9][0-9][0-9]_*' 2>/dev/null; fi
-    done | sort
+        if [ -e "$p" ]; then find "$p" -name '._cfg[0-9][0-9][0-9][0-9]_*' 2>/dev/null || true; fi
+    done | LC_ALL=C sort
 }
 
+# The newest kernel in /lib/modules, if it is not the running one.
 newer_kernel() {
-    local newest
-    newest=$(find /lib/modules -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort -V | tail -n1)
-    if [[ -n $newest && $newest != "$(uname -r)" ]]; then echo "$newest"; fi
+    local newest d
+    newest=$(for d in /lib/modules/*/; do
+            [ -d "$d" ] || continue
+            d=${d%/}
+            printf '%s\n' "${d##*/}"
+        done | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
+    if [ -n "$newest" ] && [ "$newest" != "$(uname -r)" ]; then printf '%s\n' "$newest"; fi
 }
 
 binpkgs_enabled() {
-    [[ " $(portageq envvar FEATURES 2>/dev/null) " == *" getbinpkg "* ]]
+    [[ " $(portageq envvar FEATURES 2>/dev/null) " = *" getbinpkg "* ]]
 }
 
 status_text() {
@@ -716,7 +771,7 @@ status_text() {
     if binpkgs_enabled; then s+="    Ready-made packages: on"; else s+="    Ready-made packages: off"; fi
     if (( news > 0 )); then s+=$'\n'"Unread Gentoo news: ${news} (Maintenance > Read Gentoo news)"; fi
     if (( cfg > 0 )); then s+=$'\n'"Configuration updates waiting: ${cfg} (Maintenance)"; fi
-    if [[ -n $kern ]]; then s+=$'\n'"A newer kernel (${kern}) is installed: restart the computer to use it."; fi
+    if [ -n "$kern" ]; then s+=$'\n'"A newer kernel (${kern}) is installed: restart the computer to use it."; fi
     printf '%s' "$s"
 }
 
@@ -728,17 +783,17 @@ status_text() {
 search_packages() {
     local term=$1 mode=${2:-name} name inst latest desc
     local -a opts=(--search)
-    if [[ $mode == "desc" ]]; then opts=(--searchdesc); fi
+    if [ "$mode" = "desc" ]; then opts=(--searchdesc); fi
     busy "Searching for '${term}'. This takes a few seconds..."
-    OUT=$(emerge "${opts[@]}" --color=n --nospinner "$term" 2>&1)
+    OUT=$(emerge "${opts[@]}" --color=n --nospinner "$term" 2>&1 || true)
     SR_NAME=(); SR_INST=(); SR_LATEST=(); SR_DESC=()
     # Fields are separated by the ASCII unit separator: with a tab, read would
     # merge consecutive separators and shift fields when one is empty.
     local sep=$'\x1f'
     local -a exact=() other=()
     while IFS=$sep read -r name inst latest desc; do
-        [[ -n $name ]] || continue
-        if [[ ${name##*/} == "${term,,}" || ${name##*/} == "${term,,}-bin" ]]; then
+        [ -n "$name" ] || continue
+        if [ "${name##*/}" = "${term,,}" ] || [ "${name##*/}" = "${term,,}-bin" ]; then
             exact+=("${name}${sep}${inst}${sep}${latest}${sep}${desc}")
         else
             other+=("${name}${sep}${inst}${sep}${latest}${sep}${desc}")
@@ -761,7 +816,7 @@ install_flow() {
     local term=${1:-} i label count max=150
     local -a items=()
     TITLE="Find and install"
-    if [[ -z $term ]]; then
+    if [ -z "$term" ]; then
         ui_input "What are you looking for? Type a program name or part of it, for example: firefox, vlc, gimp, htop." "" || return 0
         term=$CHOICE
     fi
@@ -782,8 +837,8 @@ install_flow() {
     count=${#SR_NAME[@]}
     for (( i = 0; i < count && i < max; i++ )); do
         label="${SR_NAME[i]}"
-        if [[ -n ${SR_INST[i]} ]]; then label+="  [installed]"; fi
-        if [[ -n ${SR_DESC[i]} ]]; then label+="  ${SR_DESC[i]}"; fi
+        if [ -n "${SR_INST[i]}" ]; then label+="  [installed]"; fi
+        if [ -n "${SR_DESC[i]}" ]; then label+="  ${SR_DESC[i]}"; fi
         items+=("$i" "${label:0:110}")
     done
     local text="Found ${count} package(s) for '${term}'."
@@ -801,11 +856,11 @@ package_actions() {
     name=${SR_NAME[i]}; inst=${SR_INST[i]}; latest=${SR_LATEST[i]}; desc=${SR_DESC[i]}
     TITLE=$name
     text="${name}"$'\n'"${desc}"$'\n\n'"Newest version available: ${latest:-unknown}"$'\n'
-    if [[ -n $inst ]]; then
+    if [ -n "$inst" ]; then
         text+="Installed version: ${inst}"$'\n\n'"It is already installed. Newer versions arrive with the regular system update."
         if ! ui_menu "$text" "back" reinstall "Reinstall it" remove "Remove it" back "Back"; then return 0; fi
         case "$CHOICE" in
-            reinstall) plan_and_run "Reinstall ${name}" --oneshot "$name" ;;
+            reinstall) plan_and_run "Reinstall ${name}" --oneshot "$name" || true ;;
             remove) remove_package "$name" ;;
         esac
         return 0
@@ -820,9 +875,9 @@ package_actions() {
     fi
     local rc=0
     case "$CHOICE" in
-        normal) plan_and_run "Install ${name}" "$name"; rc=$? ;;
-        binary) plan_and_run "Install ${name} (ready-made packages only)" --getbinpkgonly "$name"; rc=$? ;;
-        source) plan_and_run "Install ${name} (compiled on this computer)" --usepkg=n --getbinpkg=n "$name"; rc=$? ;;
+        normal) plan_and_run "Install ${name}" "$name" || rc=$? ;;
+        binary) plan_and_run "Install ${name} (ready-made packages only)" --getbinpkgonly "$name" || rc=$? ;;
+        source) plan_and_run "Install ${name} (compiled on this computer)" --usepkg=n --getbinpkg=n "$name" || rc=$? ;;
         *) return 0 ;;
     esac
     if (( rc == 3 )); then ui_msg "Nothing to do: ${name} and everything it needs are already installed."; fi
@@ -839,7 +894,7 @@ is_critical() {
     case "$1" in
         sys-kernel/*|sys-boot/*|sys-firmware/*|sys-apps/*|app-admin/sudo|app-admin/doas|\
         net-misc/networkmanager|net-misc/dhcpcd|kde-plasma/plasma-meta|gnome-base/gnome|gnome-base/gnome-light|\
-        x11-misc/sddm|gnome-base/gdm|x11-misc/lightdm*|gui-libs/display-manager-init|sys-fs/*|\
+        gui-apps/sddm|gnome-base/gdm|x11-misc/lightdm*|gui-libs/display-manager-init|sys-fs/*|\
         x11-drivers/*|app-admin/sysklogd|sys-process/cronie|net-misc/chrony|app-portage/gentoolkit)
             return 0 ;;
     esac
@@ -847,7 +902,7 @@ is_critical() {
 }
 
 world_entries() {
-    grep -vE '^[[:space:]]*(#|$)' "$WORLD_FILE" 2>/dev/null | sort -u
+    grep -vE '^[[:space:]]*(#|$)' "$WORLD_FILE" 2>/dev/null | LC_ALL=C sort -u || true
 }
 
 remove_flow() {
@@ -855,13 +910,13 @@ remove_flow() {
     local -a matches=() items=()
     TITLE="Remove a package"
     while IFS= read -r e; do
-        if [[ -z $term || $e == *"$term"* ]]; then matches+=("$e"); fi
+        if [[ -z $term || $e = *"$term"* ]]; then matches+=("$e"); fi
     done < <(world_entries)
     if (( ${#matches[@]} == 0 )); then
         ui_msg "None of the packages you installed matches '${term}'. (Only packages you installed yourself can be removed here; the rest are dependencies that Portage manages.)"
         return 0
     fi
-    if (( ${#matches[@]} == 1 )) && [[ -n $term ]]; then
+    if (( ${#matches[@]} == 1 )) && [ -n "$term" ]; then
         remove_package "${matches[0]}"
         return 0
     fi
@@ -883,24 +938,24 @@ remove_package() {
         fi
     fi
     busy "Checking what removing ${pkg} would do..."
-    emerge --deselect "$pkg" >>"$LOG" 2>&1
-    OUT=$(emerge --pretend --depclean --color=n --nospinner "$pkg" 2>&1)
+    emerge --deselect "$pkg" >>"$LOG" 2>&1 || true
+    OUT=$(emerge --pretend --depclean --color=n --nospinner "$pkg" 2>&1 || true)
     sel=$(sed -n 's/^All selected packages: //p' <<<"$OUT")
     count=$(awk '/^Number to remove:/ {print $NF}' <<<"$OUT")
-    if [[ -z $sel || ${count:-0} == "0" ]]; then
-        emerge --noreplace --nodeps "$pkg" >>"$LOG" 2>&1
+    if [ -z "$sel" ] || [ "${count:-0}" = "0" ]; then
+        emerge --noreplace --nodeps "$pkg" >>"$LOG" 2>&1 || true
         f=$(tmpfile)
         {
-            echo "${pkg} was not removed, because other installed packages need it."
-            echo "Portage's explanation:"
-            echo
+            printf '%s\n' "${pkg} was not removed, because other installed packages need it."
+            printf '%s\n' "Portage's explanation:"
+            printf '\n'
             printf '%s\n' "$OUT"
         } >"$f"
         ui_file "$f"
         return 0
     fi
     if ! ui_yesno "This will remove:"$'\n'"$(tr ' ' '\n' <<<"$sel" | sed 's/^=/  /')"$'\n\n'"Go ahead?" y; then
-        emerge --noreplace --nodeps "$pkg" >>"$LOG" 2>&1
+        emerge --noreplace --nodeps "$pkg" >>"$LOG" 2>&1 || true
         return 0
     fi
     if run_visible emerge --color=y --depclean "$pkg"; then
@@ -933,8 +988,8 @@ update_flow() {
     news_flow quiet
     perl_before=$(perl_version)
     TITLE="Update the system"
-    plan_and_run "System update" --update --deep --newuse --keep-going=y @world
-    rc=$?
+    rc=0
+    plan_and_run "System update" --update --deep --newuse --keep-going=y @world || rc=$?
     if (( rc == 3 )); then ui_msg "Everything is already up to date."; fi
     after_update "$perl_before"
 }
@@ -942,13 +997,13 @@ update_flow() {
 after_update() {
     local perl_before=$1 kern
     TITLE="After the update"
-    if [[ -n $perl_before && $(perl_version) != "$perl_before" ]] && have perl-cleaner; then
+    if [ -n "$perl_before" ] && [ "$(perl_version)" != "$perl_before" ] && have perl-cleaner; then
         ui_msg "Perl was upgraded (${perl_before} to $(perl_version)). Perl modules built for the old version are now rebuilt, otherwise some programs and later builds fail."
         perl_rebuild
     fi
     if portageq list_preserved_libs / >/dev/null 2>&1; then
         ui_msg "Some programs still use old versions of updated libraries. They are rebuilt now so the old libraries can be removed."
-        run_emerge @preserved-rebuild
+        run_emerge @preserved-rebuild || true
     fi
     depclean_flow quiet
     if (( $(pending_configs | wc -l) > 0 )); then
@@ -956,15 +1011,15 @@ after_update() {
             config_flow
         fi
     fi
-    if have flatpak && [[ -n $(flatpak list --app --columns=application 2>/dev/null) ]]; then
+    if have flatpak && [ -n "$(flatpak list --app --columns=application 2>/dev/null)" ]; then
         if ui_yesno "Update your Flatpak apps too?" y; then
-            run_visible flatpak update -y
+            run_visible flatpak update -y || true
             pause_text
         fi
     fi
     kern=$(newer_kernel)
     TITLE="Update finished"
-    if [[ -n $kern ]]; then
+    if [ -n "$kern" ]; then
         ui_msg "Update finished. A new kernel (${kern}) was installed: restart the computer to start using it. The previous kernel stays in the boot menu as a fallback."
     else
         ui_msg "Update finished."
@@ -980,15 +1035,15 @@ depclean_flow() {
     local quiet=${1:-} sel count
     TITLE="Remove unneeded packages"
     busy "Looking for packages that nothing needs anymore..."
-    OUT=$(emerge --pretend --depclean --color=n --nospinner 2>&1)
+    OUT=$(emerge --pretend --depclean --color=n --nospinner 2>&1 || true)
     sel=$(sed -n 's/^All selected packages: //p' <<<"$OUT")
     count=$(awk '/^Number to remove:/ {print $NF}' <<<"$OUT")
-    if [[ -z $sel || ${count:-0} == "0" ]]; then
-        if [[ -z $quiet ]]; then ui_msg "Nothing to clean up: every installed package is still needed."; fi
+    if [ -z "$sel" ] || [ "${count:-0}" = "0" ]; then
+        if [ -z "$quiet" ]; then ui_msg "Nothing to clean up: every installed package is still needed."; fi
         return 0
     fi
     if ui_yesno "These ${count} package(s) are no longer needed by anything you installed (usually old versions or dependencies of removed programs):"$'\n\n'"$(tr ' ' '\n' <<<"$sel" | sed 's/^=/  /')"$'\n\n'"Remove them?" y; then
-        run_visible emerge --color=y --depclean
+        run_visible emerge --color=y --depclean || true
         pause_text
     fi
 }
@@ -1008,13 +1063,13 @@ space_flow() {
         return 0
     fi
     clear_screen
-    run_visible eclean-dist --deep
-    if have eclean-pkg; then eclean-pkg --deep 2>&1 | tee -a "$LOG"; fi
+    run_visible eclean-dist --deep || true
+    if have eclean-pkg; then eclean-pkg --deep 2>&1 | tee -a "$LOG" || true; fi
     pause_text
-    leftovers=$(du -sh /var/tmp/portage 2>/dev/null | awk '{print $1}')
-    if [[ -n $(find /var/tmp/portage -mindepth 1 -maxdepth 1 2>/dev/null | head -n1) ]]; then
+    leftovers=$(du -sh /var/tmp/portage 2>/dev/null | awk '{print $1}' || true)
+    if [ -n "$(find /var/tmp/portage -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 || true)" ]; then
         if ui_yesno "Leftovers from failed or interrupted builds use ${leftovers:-some space} in /var/tmp/portage. Delete them? (Do not do this while another emerge is running.)" y; then
-            find /var/tmp/portage -mindepth 1 -delete 2>/dev/null
+            clear_dir /var/tmp/portage
         fi
     fi
     after=$(df -h / | awk 'NR == 2 {print $4}')
@@ -1032,17 +1087,17 @@ kernels_flow() {
         fi
     fi
     busy "Checking installed kernels..."
-    OUT=$(eclean-kernel -p -n 3 2>&1)
+    OUT=$(eclean-kernel -p -n 3 2>&1 || true)
     f=$(tmpfile)
     {
-        echo "Old kernels are kept after updates as a fallback. This keeps the 3 newest"
-        echo "and removes older ones. What eclean-kernel would do:"
-        echo
+        printf '%s\n' "Old kernels are kept after updates as a fallback. This keeps the 3 newest"
+        printf '%s\n' "and removes older ones. What eclean-kernel would do:"
+        printf '\n'
         printf '%s\n' "$OUT"
     } >"$f"
     ui_file "$f"
     if ui_yesno "Remove the older kernels listed above (keeping the 3 newest and the running one)?" n; then
-        run_visible eclean-kernel -n 3
+        run_visible eclean-kernel -n 3 || true
         pause_text
     fi
 }
@@ -1050,14 +1105,14 @@ kernels_flow() {
 perl_rebuild() {
     local edo
     edo=$(portageq envvar EMERGE_DEFAULT_OPTS 2>/dev/null || true)
-    run_visible env EMERGE_DEFAULT_OPTS="${edo} --quiet-build=y --color=y" perl-cleaner --all
+    run_visible env EMERGE_DEFAULT_OPTS="${edo} --quiet-build=y --color=y" perl-cleaner --all || true
     pause_text
 }
 
 preserved_flow() {
     TITLE="Rebuild after library updates"
     if portageq list_preserved_libs / >/dev/null 2>&1; then
-        run_emerge @preserved-rebuild
+        run_emerge @preserved-rebuild || true
     else
         ui_msg "Nothing to do: no program is using an outdated library."
     fi
@@ -1069,14 +1124,14 @@ news_flow() {
     TITLE="Gentoo news"
     n=$(news_count)
     if (( n == 0 )); then
-        if [[ -z $quiet ]]; then ui_msg "No unread news."; fi
+        if [ -z "$quiet" ]; then ui_msg "No unread news."; fi
         return 0
     fi
-    if [[ -n $quiet ]] && ! ui_yesno "There are ${n} unread Gentoo news item(s). They announce changes that sometimes need a manual step, so it is worth reading them before updating. Read them now?" y; then
+    if [ -n "$quiet" ] && ! ui_yesno "There are ${n} unread Gentoo news item(s). They announce changes that sometimes need a manual step, so it is worth reading them before updating. Read them now?" y; then
         return 0
     fi
     f=$(tmpfile)
-    eselect news read new 2>&1 | sed 's/\x1b\[[0-9;]*m//g' >"$f"
+    eselect news read new 2>&1 | strip_colors >"$f" || true
     ui_file "$f"
 }
 
@@ -1084,9 +1139,9 @@ news_flow() {
 config_note() {
     case "$1" in
         /etc/default/grub|/etc/conf.d/hostname|/etc/conf.d/keymaps|/etc/conf.d/display-manager|/etc/locale.gen|/etc/hosts|/etc/fstab|/etc/sudoers|/etc/doas.conf|/etc/portage/*)
-            echo "This file was customised during installation or by you. Keeping your version is usually right; the update's changes are often just comments." ;;
+            printf '%s\n' "This file was customised during installation or by you. Keeping your version is usually right; the update's changes are often just comments." ;;
         *)
-            echo "If you never changed this file yourself, using the new version is usually right." ;;
+            printf '%s\n' "If you never changed this file yourself, using the new version is usually right." ;;
     esac
 }
 
@@ -1112,17 +1167,17 @@ config_flow() {
     for target in "${targets[@]}"; do
         local newest=""
         for cfg in "${cfgs[@]}"; do
-            if [[ $(cfg_target "$cfg") == "$target" ]]; then newest=$cfg; fi
+            if [ "$(cfg_target "$cfg")" = "$target" ]; then newest=$cfg; fi
         done
-        [[ -n $newest ]] || continue
+        [ -n "$newest" ] || continue
         diffout=$(diff -u "$target" "$newest" 2>&1 || true)
         f=$(tmpfile)
         {
-            echo "File: ${target}"
-            echo
-            echo "An update brought a new version of this file. Lines starting with - are"
-            echo "only in your current file, lines starting with + only in the new one."
-            echo
+            printf '%s\n' "File: ${target}"
+            printf '\n'
+            printf '%s\n' "An update brought a new version of this file. Lines starting with - are"
+            printf '%s\n' "only in your current file, lines starting with + only in the new one."
+            printf '\n'
             printf '%s\n' "$diffout"
         } >"$f"
         TITLE="Update for ${target}"
@@ -1136,14 +1191,17 @@ config_flow() {
         fi
         case "$CHOICE" in
             keep)
-                rm -f "${target%/*}"/._cfg[0-9][0-9][0-9][0-9]_"${target##*/}"
+                rm -f -- "${target%/*}"/._cfg[0-9][0-9][0-9][0-9]_"${target##*/}"
                 log "Config: kept ${target}" ;;
             new)
                 local bak
                 bak="${target}.bak-$(date +%Y%m%d-%H%M%S)"
-                cp -p "$target" "$bak" 2>/dev/null || true
-                mv -f "$newest" "$target"
-                rm -f "${target%/*}"/._cfg[0-9][0-9][0-9][0-9]_"${target##*/}"
+                cp -p -- "$target" "$bak" 2>/dev/null || true
+                if ! mv -f -- "$newest" "$target"; then
+                    ui_msg "Could not replace ${target}; it was left as it is."
+                    continue
+                fi
+                rm -f -- "${target%/*}"/._cfg[0-9][0-9][0-9][0-9]_"${target##*/}"
                 log "Config: replaced ${target} (backup ${bak})"
                 ui_msg "Replaced. Your previous file is saved as ${bak}." ;;
             stop) return 0 ;;
@@ -1159,17 +1217,17 @@ settings_flow() {
     while true; do
         f=$(tmpfile)
         {
-            echo "Settings this helper saved when Portage asked for them. They live in"
-            echo "their own files, so your other settings are never touched."
+            printf '%s\n' "Settings this helper saved when Portage asked for them. They live in"
+            printf '%s\n' "their own files, so your other settings are never touched."
             for file in "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"; do
-                echo
-                echo "== ${file}"
-                if [[ -s $file ]]; then cat "$file"; else echo "(none)"; fi
+                printf '\n'
+                printf '%s\n' "== ${file}"
+                if [ -s "$file" ]; then cat "$file"; else printf '%s\n' "(none)"; fi
             done
         } >"$f"
         if ! ui_menu "Package options (USE flags), accepted licences, allowed testing versions and blocked versions saved by this helper." "view" \
             view "Show them" \
-            edit "Edit them (nano text editor)" \
+            edit "Edit them (in \$EDITOR, or nano)" \
             clear "Remove all of them" \
             back "Back"; then
             return 0
@@ -1179,15 +1237,15 @@ settings_flow() {
             edit)
                 local -a existing=()
                 for file in "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"; do
-                    if [[ -f $file ]]; then existing+=("$file"); fi
+                    if [ -f "$file" ]; then existing+=("$file"); fi
                 done
                 if (( ${#existing[@]} == 0 )); then ui_msg "There are none yet."; continue; fi
                 clear_screen
-                nano "${existing[@]}"
+                "${EDITOR:-nano}" "${existing[@]}" || true
                 ;;
             clear)
                 if ui_yesno "Remove all settings saved by this helper? Packages that needed them may fail to update until the settings are added again (the helper offers that automatically)." n; then
-                    rm -f "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"
+                    rm -f -- "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"
                     log "Removed all helper settings"
                     ui_msg "Removed. The next system update rebuilds whatever is affected."
                 fi
@@ -1201,9 +1259,9 @@ world_flow() {
     local f
     f=$(tmpfile)
     {
-        echo "Packages you (or the installer) chose to install. Their dependencies are"
-        echo "not listed; Portage installs, updates and removes those automatically."
-        echo
+        printf '%s\n' "Packages you (or the installer) chose to install. Their dependencies are"
+        printf '%s\n' "not listed; Portage installs, updates and removes those automatically."
+        printf '\n'
         world_entries
     } >"$f"
     TITLE="Packages I installed"
@@ -1227,7 +1285,7 @@ maint_menu() {
             world "Show the packages I installed"
             settings "Settings added by this helper"
         )
-        if [[ -s $LAST_FAILURE ]]; then items+=(failure "Show the last failure report"); fi
+        if [ -s "$LAST_FAILURE" ]; then items+=(failure "Show the last failure report"); fi
         if ! ui_menu "Things to do now and then to keep the system tidy. Each one explains itself and asks before changing anything." "$def" "${items[@]}"; then
             return 0
         fi
@@ -1267,11 +1325,10 @@ flathub_ready() {
     remotes=$(flatpak remotes --columns=name 2>/dev/null || true)
     if grep -qx "flathub" <<<"$remotes"; then return 0; fi
     if ui_yesno "Flathub (the main Flatpak app store) is not set up yet. Add it now?" y; then
-        run_visible flatpak remote-add --if-not-exists flathub "$FLATHUB_URL"
+        run_visible flatpak remote-add --if-not-exists flathub "$FLATHUB_URL" || true
         pause_text
         remotes=$(flatpak remotes --columns=name 2>/dev/null || true)
-        grep -qx "flathub" <<<"$remotes"
-        return $?
+        if grep -qx "flathub" <<<"$remotes"; then return 0; fi
     fi
     return 1
 }
@@ -1281,21 +1338,21 @@ flatpak_install() {
     local -a items=() ids=()
     TITLE="Install a Flatpak app"
     flathub_ready || return 0
-    if [[ -z $term ]]; then
+    if [ -z "$term" ]; then
         ui_input "Which app are you looking for? (for example: spotify, discord, steam, obs)" "" || return 0
         term=$CHOICE
     fi
     busy "Searching Flathub for '${term}'..."
-    OUT=$(flatpak search --columns=application,name,description "$term" 2>&1)
+    OUT=$(flatpak search --columns=application,name,description "$term" 2>&1 || true)
     while IFS= read -r line; do
-        [[ -n $line ]] || continue
-        if [[ $line == *$'\t'* ]]; then
+        [ -n "$line" ] || continue
+        if [[ $line = *$'\t'* ]]; then
             # A non-whitespace separator keeps empty columns in place.
             IFS=$'\x1f' read -r id name desc <<<"${line//$'\t'/$'\x1f'}"
         else
             read -r id name desc <<<"$line"
         fi
-        [[ $id == *.*.* ]] || continue
+        [[ $id = *.*.* ]] || continue
         ids+=("$id")
         items+=("$id" "${name}: ${desc}")
     done <<<"$OUT"
@@ -1322,13 +1379,13 @@ flatpak_remove() {
     local -a items=()
     TITLE="Remove a Flatpak app"
     while IFS=$'\x1f' read -r id name; do
-        [[ -n $id ]] || continue
+        [ -n "$id" ] || continue
         items+=("$id" "${name:-$id}  (${id})")
     done < <(flatpak list --app --columns=application,name 2>/dev/null | tr '\t' '\037')
     if (( ${#items[@]} == 0 )); then ui_msg "No Flatpak apps are installed."; return 0; fi
     if ! ui_menu "Which Flatpak app should be removed?" "" "${items[@]}"; then return 0; fi
     if ui_yesno "Remove ${CHOICE}?" y; then
-        run_visible flatpak uninstall -y --noninteractive "$CHOICE"
+        run_visible flatpak uninstall -y --noninteractive "$CHOICE" || true
         pause_text
     fi
 }
@@ -1357,12 +1414,12 @@ flatpak_menu() {
         case "$CHOICE" in
             install) flatpak_install ;;
             remove) flatpak_remove ;;
-            update) run_visible flatpak update -y; pause_text ;;
-            unused) run_visible flatpak uninstall --unused -y; pause_text ;;
+            update) run_visible flatpak update -y || true; pause_text ;;
+            unused) run_visible flatpak uninstall --unused -y || true; pause_text ;;
             list)
                 local f
                 f=$(tmpfile)
-                flatpak list --app --columns=name,application,version >"$f" 2>&1
+                flatpak list --app --columns=name,application,version >"$f" 2>&1 || true
                 TITLE="Installed Flatpak apps"
                 ui_file "$f" ;;
         esac
@@ -1375,7 +1432,7 @@ flatpak_menu() {
 GROUPS_ADDED=""
 
 init_system() {
-    if [[ -d /run/systemd/system ]]; then echo "systemd"; else echo "openrc"; fi
+    if [ -d /run/systemd/system ]; then printf '%s\n' "systemd"; else printf '%s\n' "openrc"; fi
 }
 
 # pkg_installed CATEGORY/NAME
@@ -1387,8 +1444,8 @@ pkg_installed() {
 pkg_has_use() {
     local d
     for d in /var/db/pkg/"${1}"-[0-9]*; do
-        [[ -r $d/USE ]] || continue
-        if [[ " $(<"$d/USE") " == *" $2 "* ]]; then return 0; fi
+        [ -r "$d/USE" ] || continue
+        if [[ " $(<"$d/USE") " = *" $2 "* ]]; then return 0; fi
     done
     return 1
 }
@@ -1399,12 +1456,12 @@ svc_unit() {
     local n init
     init=$(init_system)
     for n in "$@"; do
-        if [[ $init == "systemd" ]]; then
+        if [ "$init" = "systemd" ]; then
             if [[ $n != *.* ]]; then n="${n}.service"; fi
-            if [[ -n $(systemctl list-unit-files --no-legend "$n" 2>/dev/null) ]]; then echo "$n"; return 0; fi
+            if [ -n "$(systemctl list-unit-files --no-legend "$n" 2>/dev/null || true)" ]; then printf '%s\n' "$n"; return 0; fi
         else
-            if [[ $n == *.* ]]; then continue; fi
-            if [[ -x /etc/init.d/$n ]]; then echo "$n"; return 0; fi
+            if [[ $n = *.* ]]; then continue; fi
+            if [ -x "/etc/init.d/$n" ]; then printf '%s\n' "$n"; return 0; fi
         fi
     done
     return 1
@@ -1413,7 +1470,7 @@ svc_unit() {
 svc_active() {
     local u
     u=$(svc_unit "$@") || return 1
-    if [[ $(init_system) == "systemd" ]]; then
+    if [ "$(init_system)" = "systemd" ]; then
         systemctl is-active --quiet "$u"
     else
         rc-service "$u" status >/dev/null 2>&1
@@ -1423,7 +1480,7 @@ svc_active() {
 svc_enabled() {
     local u shown
     u=$(svc_unit "$@") || return 1
-    if [[ $(init_system) == "systemd" ]]; then
+    if [ "$(init_system)" = "systemd" ]; then
         systemctl is-enabled --quiet "$u"
     else
         shown=$(rc-update show default 2>/dev/null; rc-update show boot 2>/dev/null)
@@ -1435,10 +1492,10 @@ svc_enabled() {
 svc_enable_now() {
     local u rc=0
     u=$(svc_unit "$@") || { log "No service found among: $*"; return 1; }
-    if [[ $(init_system) == "systemd" ]]; then
+    if [ "$(init_system)" = "systemd" ]; then
         systemctl enable --now "$u" >>"$LOG" 2>&1 || rc=$?
     else
-        rc-update add "$u" default >>"$LOG" 2>&1
+        rc-update add "$u" default >>"$LOG" 2>&1 || true
         rc-service "$u" start >>"$LOG" 2>&1 || rc=$?
     fi
     log "Enable and start ${u}: exit ${rc}"
@@ -1449,11 +1506,11 @@ svc_enable_now() {
 svc_disable_now() {
     local u
     u=$(svc_unit "$@") || return 0
-    if [[ $(init_system) == "systemd" ]]; then
-        systemctl disable --now "$u" >>"$LOG" 2>&1
+    if [ "$(init_system)" = "systemd" ]; then
+        systemctl disable --now "$u" >>"$LOG" 2>&1 || true
     else
-        rc-service "$u" stop >>"$LOG" 2>&1
-        rc-update del "$u" default >>"$LOG" 2>&1
+        rc-service "$u" stop >>"$LOG" 2>&1 || true
+        rc-update del "$u" default >>"$LOG" 2>&1 || true
     fi
     log "Disable and stop ${u}"
     return 0
@@ -1462,7 +1519,7 @@ svc_disable_now() {
 # The everyday (non-root) user this helper is working for.
 target_user() {
     local u=${SUDO_USER:-${DOAS_USER:-}}
-    if [[ -n $u && $u != "root" ]]; then echo "$u"; return 0; fi
+    if [ -n "$u" ] && [ "$u" != "root" ]; then printf '%s\n' "$u"; return 0; fi
     getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}'
 }
 
@@ -1472,7 +1529,7 @@ add_user_groups() {
     local user g current added=""
     user=$(target_user)
     GROUPS_ADDED=""
-    if [[ -z $user ]]; then return 0; fi
+    if [ -z "$user" ]; then return 0; fi
     current=" $(id -nG "$user" 2>/dev/null) "
     for g in "$@"; do
         if getent group "$g" >/dev/null && [[ $current != *" $g "* ]]; then
@@ -1480,11 +1537,11 @@ add_user_groups() {
         fi
     done
     GROUPS_ADDED=$added
-    if [[ -n $added ]]; then log "Added ${user} to groups: ${added}"; fi
+    if [ -n "$added" ]; then log "Added ${user} to groups: ${added}"; fi
 }
 
 groups_note() {
-    if [[ -n $GROUPS_ADDED ]]; then
+    if [ -n "$GROUPS_ADDED" ]; then
         printf '%s' $'\n\n'"Your user was added to the group(s): ${GROUPS_ADDED}. Log out and back in for that to take effect."
     fi
 }
@@ -1493,31 +1550,64 @@ groups_note() {
 pci_devices() {
     local d class vendor drv name slot
     for d in /sys/bus/pci/devices/*; do
-        [[ -r $d/class ]] || continue
+        [ -r "$d/class" ] || continue
         class=$(<"$d/class")
-        [[ $class == "$1"* ]] || continue
+        [[ $class = "$1"* ]] || continue
         vendor=$(<"$d/vendor")
         slot=${d##*/}
         drv="none"
-        if [[ -L $d/driver ]]; then drv=$(basename "$(readlink "$d/driver")"); fi
+        if [ -L "$d/driver" ]; then drv=$(basename "$(readlink "$d/driver")"); fi
         name=""
-        if have lspci; then name=$(lspci -s "$slot" 2>/dev/null | cut -d' ' -f2-); fi
+        if have lspci; then name=$(LC_ALL=C lspci -s "$slot" 2>/dev/null | cut -d' ' -f2- || true); fi
         printf '%s|%s|%s|%s\n' "$slot" "$vendor" "$drv" "${name:-PCI device ${slot}}"
     done
+}
+
+# broadcom_kind_here: "wl" or "b43" when this computer has a Broadcom Wi-Fi
+# chip that needs that driver (same table as broadcom_wifi_kind in the installer).
+broadcom_kind_here() {
+    local slot vendor drv name dev result=""
+    while IFS='|' read -r slot vendor drv name; do
+        [ "$vendor" = "0x14e4" ] || continue
+        dev=$(cat -- "/sys/bus/pci/devices/${slot}/device" 2>/dev/null || true)
+        case "$dev" in
+            0x43a0|0x43b1|0x4365|0x4359) result="wl" ;;
+            0x4311|0x4312|0x4315|0x4318|0x4319|0x4328|0x4329|0x432a|0x432b|0x432c|0x432d|0x4331)
+                [ -n "$result" ] || result="b43" ;;
+        esac
+    done < <(pci_devices "0x0280")
+    printf '%s' "$result"
+}
+
+is_apple() {
+    [[ $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true) = *Apple* ]]
+}
+
+is_laptop() {
+    if compgen -G "/sys/class/power_supply/BAT*" >/dev/null; then return 0; fi
+    case "$(cat /sys/class/dmi/id/chassis_type 2>/dev/null || printf '0')" in
+        8|9|10|11|14|30|31|32) return 0 ;;
+    esac
+    return 1
+}
+
+# Number of graphics chips (two means a hybrid laptop, for example Intel + NVIDIA).
+gpu_count() {
+    pci_devices "0x03" | grep -c . || true
 }
 
 wifi_ifaces() {
     local n out=""
     for n in /sys/class/net/*; do
-        if [[ -d $n/wireless || -e $n/phy80211 ]]; then out+="${out:+ }${n##*/}"; fi
+        if [ -d "$n/wireless" ] || [ -e "$n/phy80211" ]; then out+="${out:+ }${n##*/}"; fi
     done
     printf '%s' "$out"
 }
 
 desktop_kind() {
-    if pkg_installed kde-plasma/plasma-workspace; then echo "plasma"
-    elif pkg_installed gnome-base/gnome-shell; then echo "gnome"
-    else echo "other"; fi
+    if pkg_installed kde-plasma/plasma-workspace; then printf '%s\n' "plasma"
+    elif pkg_installed gnome-base/gnome-shell; then printf '%s\n' "gnome"
+    else printf '%s\n' "other"; fi
 }
 
 task_status() {
@@ -1525,21 +1615,21 @@ task_status() {
     case "$1" in
         printing)
             if pkg_installed net-print/cups; then
-                if svc_enabled cupsd cups.service; then echo "set up"; else echo "installed, not running"; fi
+                if svc_enabled cupsd cups.service; then printf '%s\n' "set up"; else printf '%s\n' "installed, not running"; fi
             fi ;;
-        scanning) if pkg_installed media-gfx/sane-backends; then echo "installed"; fi ;;
+        scanning) if pkg_installed media-gfx/sane-backends; then printf '%s\n' "installed"; fi ;;
         wifi)
             n=$(wifi_ifaces)
-            if [[ -n $n ]]; then echo "adapter: ${n}"; else echo "no adapter found"; fi ;;
+            if [ -n "$n" ]; then printf '%s\n' "adapter: ${n}"; else printf '%s\n' "no adapter found"; fi ;;
         bluetooth)
             if pkg_installed net-wireless/bluez; then
-                if svc_enabled bluetooth; then echo "set up"; else echo "installed, off"; fi
+                if svc_enabled bluetooth; then printf '%s\n' "set up"; else printf '%s\n' "installed, off"; fi
             fi ;;
-        codecs) if pkg_installed media-plugins/gst-plugins-libav; then echo "installed"; fi ;;
-        ssh) if svc_active sshd; then echo "server running"; fi ;;
+        codecs) if pkg_installed media-plugins/gst-plugins-libav; then printf '%s\n' "installed"; fi ;;
+        ssh) if svc_active sshd; then printf '%s\n' "server running"; fi ;;
         firewall)
-            if have ufw && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then echo "on"; fi ;;
-        vms) if pkg_installed app-emulation/virt-manager; then echo "installed"; fi ;;
+            if have ufw && [[ $(LC_ALL=C ufw status 2>/dev/null) = *"Status: active"* ]]; then printf '%s\n' "on"; fi ;;
+        vms) if pkg_installed app-emulation/virt-manager; then printf '%s\n' "installed"; fi ;;
     esac
 }
 
@@ -1559,7 +1649,7 @@ task_printing() {
     )
     local -a pkgs=()
     TITLE="Printing"
-    if [[ $(desktop_kind) == "plasma" ]]; then
+    if [ "$(desktop_kind)" = "plasma" ]; then
         items+=(kde-plasma/print-manager "Printers page in KDE System Settings" on)
     fi
     if ! ui_checklist "Printing on Linux goes through CUPS. Most printers from the last ten years print without any driver (driverless printing, also called IPP Everywhere or AirPrint) as long as they can be found on the network. Older printers need a driver package. Choose what to install:" "${items[@]}"; then
@@ -1613,7 +1703,7 @@ task_wifi() {
     busy "Looking for Wi-Fi hardware..."
     ifaces=$(wifi_ifaces)
     while IFS='|' read -r slot vendor drv name; do
-        [[ -n $slot ]] || continue
+        [ -n "$slot" ] || continue
         devs+=$'\n'"  ${name}"$'\n'"    driver in use: ${drv}"
     done < <(pci_devices "0x0280")
     if have lsusb; then
@@ -1621,14 +1711,14 @@ task_wifi() {
             devs+=$'\n'"  USB: ${dev#*ID }"
         done < <(lsusb 2>/dev/null | grep -iE "wireless|wlan|wi-fi|802\.11" || true)
     fi
-    if have rfkill; then rf=$(rfkill list wifi 2>/dev/null || true); fi
+    if have rfkill; then rf=$(LC_ALL=C rfkill list wifi 2>/dev/null || true); fi
     local text="Wi-Fi adapters found:${devs:-$'\n'"  none that the system recognises as Wi-Fi"}"$'\n'"Wi-Fi network interfaces: ${ifaces:-none}"
-    if [[ $rf == *"Hard blocked: yes"* ]]; then
+    if [[ $rf = *"Hard blocked: yes"* ]]; then
         text+=$'\n\n'"Wi-Fi is switched off by a hardware switch or key (for example Fn+F2 or an airplane-mode key). Switch it on there."
     fi
-    if [[ -z $devs && -z $ifaces ]]; then
+    if [ -z "$devs" ] && [ -z "$ifaces" ]; then
         text+=$'\n\n'"No Wi-Fi adapter was found. On a virtual machine that is normal. On real hardware, a USB adapter may need to be plugged in, or it may need the firmware or driver below."
-    elif [[ -n $devs && -z $ifaces ]]; then
+    elif [ -n "$devs" ] && [ -z "$ifaces" ]; then
         text+=$'\n\n'"An adapter is present but has no network interface: it is most likely missing its firmware or driver. Installing linux-firmware usually fixes this."
     fi
     items+=(sys-kernel/linux-firmware "Firmware for Wi-Fi adapters (most Intel, Realtek, MediaTek and Atheros cards need it)" on)
@@ -1636,16 +1726,36 @@ task_wifi() {
     items+=(net-misc/networkmanager "NetworkManager: connect from the network icon, or with 'nmtui' in a terminal" on)
     items+=(net-wireless/iw "iw, a Wi-Fi diagnostics tool" off)
     wlan_pci=$(pci_devices "0x0280")
-    if [[ $wlan_pci == *"|0x14e4|"* ]]; then
-        items+=(net-wireless/broadcom-sta "Broadcom 'wl' driver (proprietary, testing version; only for cards the open drivers do not support)" off)
-    fi
+    local bcm
+    bcm=$(broadcom_kind_here)
+    case "$bcm" in
+        wl)
+            text+=$'\n\n'"This Broadcom card (BCM4360, BCM4352, BCM43142 or BCM43228, found in most Macs from 2013 on) only works with Broadcom's proprietary 'wl' driver. Gentoo only has a testing (~amd64) version of it; tick it below and accept the testing version when asked."
+            items+=(net-wireless/broadcom-sta "Broadcom 'wl' driver (proprietary, testing version; needed for this card)" on) ;;
+        b43)
+            text+=$'\n\n'"This Broadcom card uses the open b43 driver, which needs Broadcom's firmware (accept its licence when asked)."
+            items+=(sys-firmware/b43-firmware "Firmware for this Broadcom card (b43 driver)" on) ;;
+        *)
+            if [[ $wlan_pci = *"|0x14e4|"* ]]; then
+                items+=(net-wireless/broadcom-sta "Broadcom 'wl' driver (proprietary, testing version; only for cards the open drivers do not support)" off)
+            fi ;;
+    esac
     if ! ui_checklist "${text}"$'\n\n'"Choose what to install:" "${items[@]}"; then return 0; fi
     sel=$CHOICE
     read -ra pkgs <<<"$sel"
     if (( ${#pkgs[@]} > 0 )); then
-        if [[ " $sel " == *" sys-kernel/linux-firmware "* ]] && ! pkg_installed sys-kernel/linux-firmware; then restart="yes"; fi
-        if [[ " $sel " == *" net-wireless/broadcom-sta "* ]]; then restart="yes"; fi
+        if [[ " $sel " = *" sys-kernel/linux-firmware "* ]] && ! pkg_installed sys-kernel/linux-firmware; then restart="yes"; fi
+        if [[ " $sel " = *" net-wireless/broadcom-sta "* || " $sel " = *" sys-firmware/b43-firmware "* ]]; then restart="yes"; fi
         install_packages "Wi-Fi support" "${pkgs[@]}" || return 0
+    fi
+    if [[ " $sel " = *" net-wireless/broadcom-sta "* ]] && pkg_installed net-wireless/broadcom-sta; then
+        if mkdir -p /etc/modprobe.d && printf '%s\n' "# Written by gentoo_helper: this computer's Broadcom Wi-Fi card needs the" \
+            "# proprietary wl driver (net-wireless/broadcom-sta). These open drivers would" \
+            "# claim the card first. Delete this file if you replace the card." \
+            "blacklist b43" "blacklist b43legacy" "blacklist bcma" "blacklist ssb" \
+            "blacklist brcmsmac" "blacklist brcmfmac" >/etc/modprobe.d/broadcom-wl-blacklist.conf; then
+            note+=$'\n'"The open Broadcom drivers are blocked in /etc/modprobe.d/broadcom-wl-blacklist.conf so wl can take the card."
+        fi
     fi
     if pkg_installed net-misc/networkmanager && ! svc_enabled NetworkManager; then
         TITLE="Wi-Fi"
@@ -1655,10 +1765,10 @@ task_wifi() {
             svc_enable_now NetworkManager || note+=$'\n'"NetworkManager could not be started; see ${LOG}."
         fi
     fi
-    if [[ $rf == *"Soft blocked: yes"* ]]; then
+    if [[ $rf = *"Soft blocked: yes"* ]]; then
         rfkill unblock wifi >>"$LOG" 2>&1 && note+=$'\n'"Wi-Fi was switched off in software; it has been switched on."
     fi
-    if [[ $restart == "yes" ]]; then note+=$'\n\n'"Restart the computer so the adapter can load its new firmware or driver."; fi
+    if [ "$restart" = "yes" ]; then note+=$'\n\n'"Restart the computer so the adapter can load its new firmware or driver."; fi
     TITLE="Wi-Fi"
     ui_msg "Done.${note}"$'\n\n'"To connect: click the network icon in your desktop's panel, or run 'nmtui' in a terminal and choose 'Activate a connection'."
 }
@@ -1679,17 +1789,17 @@ task_bluetooth() {
         items+=(pipewire-bt "Bluetooth headphones and speakers (rebuilds PipeWire with Bluetooth support)" on)
     fi
     local text="Bluetooth adapter found: ${hw}."
-    if [[ $hw == "no" ]]; then text+=" (Many adapters only show up once the Bluetooth system is installed and its firmware is present, so installing can still help. On a virtual machine there is usually none.)"; fi
+    if [ "$hw" = "no" ]; then text+=" (Many adapters only show up once the Bluetooth system is installed and its firmware is present, so installing can still help. On a virtual machine there is usually none.)"; fi
     if ! ui_checklist "${text}"$'\n\n'"Choose what to install:" "${items[@]}"; then return 0; fi
     sel=$CHOICE
     if [[ " $sel " != *" net-wireless/bluez "* ]]; then sel="net-wireless/bluez ${sel}"; fi
     local audio="no"
-    if [[ " $sel " == *" pipewire-bt "* ]]; then audio="yes"; sel=${sel//pipewire-bt/}; fi
+    if [[ " $sel " = *" pipewire-bt "* ]]; then audio="yes"; sel=${sel//pipewire-bt/}; fi
     read -ra pkgs <<<"$sel"
     install_packages "Bluetooth support" "${pkgs[@]}" || return 0
-    if [[ $audio == "yes" ]]; then
+    if [ "$audio" = "yes" ]; then
         add_settings "$USE_FILE" "media-video/pipewire bluetooth" "Bluetooth audio"
-        plan_and_run "Rebuild PipeWire with Bluetooth audio" --oneshot --update --newuse media-video/pipewire
+        plan_and_run "Rebuild PipeWire with Bluetooth audio" --oneshot --update --newuse media-video/pipewire || true
     fi
     svc_enable_now bluetooth || note+=$'\n'"The Bluetooth service could not be started; see ${LOG}."
     add_user_groups plugdev
@@ -1701,7 +1811,7 @@ task_bluetooth() {
 kernel_package() {
     local k
     for k in sys-kernel/gentoo-kernel-bin sys-kernel/gentoo-kernel; do
-        if pkg_installed "$k"; then echo "$k"; return 0; fi
+        if pkg_installed "$k"; then printf '%s\n' "$k"; return 0; fi
     done
     return 1
 }
@@ -1709,14 +1819,14 @@ kernel_package() {
 # Add a value to VIDEO_CARDS in make.conf (a backup is kept).
 add_video_card() {
     local card=$1 f=/etc/portage/make.conf cur
-    [[ -f $f ]] || return 1
+    [ -f "$f" ] || return 1
     cur=$(sed -n 's/^VIDEO_CARDS="\(.*\)"/\1/p' "$f" | tail -n1)
-    if [[ " $cur " == *" $card "* ]]; then return 0; fi
-    cp -p "$f" "${f}.bak-$(date +%Y%m%d-%H%M%S)"
+    if [[ " $cur " = *" $card "* ]]; then return 0; fi
+    cp -p -- "$f" "${f}.bak-$(date +%Y%m%d-%H%M%S)" || return 1
     if grep -q '^VIDEO_CARDS=' "$f"; then
-        sed -i "s/^VIDEO_CARDS=\".*\"/VIDEO_CARDS=\"$(trim "${cur} ${card}")\"/" "$f"
+        sed_inplace "s/^VIDEO_CARDS=\".*\"/VIDEO_CARDS=\"$(trim "${cur} ${card}")\"/" "$f"
     else
-        printf '\n# Added by gentoo-helper\nVIDEO_CARDS="%s"\n' "$card" >>"$f"
+        printf '\n# Added by gentoo_helper\nVIDEO_CARDS="%s"\n' "$card" >>"$f"
     fi
     log "VIDEO_CARDS: added ${card}"
 }
@@ -1729,7 +1839,7 @@ task_graphics() {
         summary=""
         has_nv="no"; has_intel="no"; has_amd="no"
         while IFS='|' read -r slot vendor drv name; do
-            [[ -n $slot ]] || continue
+            [ -n "$slot" ] || continue
             summary+=$'\n'"  ${name}"$'\n'"    driver in use: ${drv}"
             case "$vendor" in
                 0x10de) has_nv="yes" ;;
@@ -1738,12 +1848,12 @@ task_graphics() {
             esac
         done < <(pci_devices "0x03")
         local text="Graphics hardware:${summary:-$'\n'"  none found"}"
-        if [[ $has_amd == "yes" || $has_intel == "yes" ]]; then
+        if [ "$has_amd" = "yes" ] || [ "$has_intel" = "yes" ]; then
             text+=$'\n\n'"AMD and Intel graphics use the open-source drivers (Mesa) that are already installed; 3D and video work out of the box."
         fi
         items=()
-        if [[ $has_nv == "yes" ]]; then items+=(nvidia "Install the NVIDIA proprietary driver (best performance for NVIDIA cards)"); fi
-        if [[ $has_intel == "yes" ]]; then items+=(intelva "Hardware video decoding for Intel graphics (smoother video, less battery use)"); fi
+        if [ "$has_nv" = "yes" ]; then items+=(nvidia "Install the NVIDIA proprietary driver (best performance for NVIDIA cards)"); fi
+        if [ "$has_intel" = "yes" ]; then items+=(intelva "Hardware video decoding for Intel graphics (smoother video, less battery use)"); fi
         items+=(info "Show detailed graphics information")
         if ! ui_menu "$text" "${items[0]}" "${items[@]}"; then return 0; fi
         case "$CHOICE" in
@@ -1764,15 +1874,15 @@ task_graphics() {
             info)
                 f=$(tmpfile)
                 {
-                    echo "Graphics devices and their drivers (lspci -k):"
-                    echo
-                    if have lspci; then lspci -k 2>/dev/null | grep -A3 -Ei "vga|3d controller|display controller"; else echo "(lspci is not installed)"; fi
-                    echo
-                    echo "VIDEO_CARDS in /etc/portage/make.conf:"
-                    grep '^VIDEO_CARDS=' /etc/portage/make.conf 2>/dev/null || echo "(not set)"
-                    echo
-                    echo "Kernel modules loaded:"
-                    grep -E "^(nvidia|nouveau|amdgpu|radeon|i915|xe) " /proc/modules 2>/dev/null | awk '{print "  " $1}'
+                    printf '%s\n' "Graphics devices and their drivers (lspci -k):"
+                    printf '\n'
+                    if have lspci; then LC_ALL=C lspci -k 2>/dev/null | grep -A3 -Ei "vga|3d controller|display controller" || true; else printf '%s\n' "(lspci is not installed)"; fi
+                    printf '\n'
+                    printf '%s\n' "VIDEO_CARDS in /etc/portage/make.conf:"
+                    grep '^VIDEO_CARDS=' /etc/portage/make.conf 2>/dev/null || printf '%s\n' "(not set)"
+                    printf '\n'
+                    printf '%s\n' "Kernel modules loaded:"
+                    grep -E "^(nvidia|nouveau|amdgpu|radeon|i915|xe) " /proc/modules 2>/dev/null | awk '{print "  " $1}' || true
                 } >"$f"
                 TITLE="Graphics information"
                 ui_file "$f" ;;
@@ -1791,19 +1901,19 @@ task_graphics() {
 # It is a heuristic; nvidia-drivers itself checks the card again when installed.
 nvidia_generation() {
     local id
-    if [[ ! $1 =~ ^0x[0-9a-fA-F]+$ ]]; then echo "current"; return 0; fi
+    if [[ ! $1 =~ ^0x[0-9a-fA-F]+$ ]]; then printf '%s\n' "current"; return 0; fi
     id=$(( $1 ))
-    if (( id >= 0x1e00 )); then echo "current"
-    elif (( id >= 0x1340 )); then echo "legacy580"
-    else echo "unsupported"; fi
+    if (( id >= 0x1e00 )); then printf '%s\n' "current"
+    elif (( id >= 0x1340 )); then printf '%s\n' "legacy580"
+    else printf '%s\n' "unsupported"; fi
 }
 
 # The generation of the oldest NVIDIA graphics card in this computer (empty if none).
 nvidia_gen_here() {
     local d gen result=""
     for d in /sys/bus/pci/devices/*; do
-        [[ -r $d/vendor && -r $d/class ]] || continue
-        [[ $(<"$d/vendor") == "0x10de" && $(<"$d/class") == 0x03* ]] || continue
+        [ -r "$d/vendor" ] && [ -r "$d/class" ] || continue
+        [[ $(<"$d/vendor") = "0x10de" && $(<"$d/class") = 0x03* ]] || continue
         gen=$(nvidia_generation "$(cat "$d/device" 2>/dev/null)")
         case "${result}:${gen}" in
             :*|current:legacy580|current:unsupported|legacy580:unsupported) result=$gen ;;
@@ -1820,23 +1930,23 @@ task_nvidia() {
         return 0
     fi
     gen=$(nvidia_gen_here)
-    if [[ $gen == "unsupported" ]]; then
+    if [ "$gen" = "unsupported" ]; then
         ui_msg "This NVIDIA card is from the Kepler generation or older (such as most GeForce GTX 600 and 700 series cards). NVIDIA no longer supports it in its proprietary driver, and Gentoo masks the old driver branches because they no longer get security fixes."$'\n\n'"Keep using the open source Nouveau driver, which is already part of the system. 3D performance is lower, but it is maintained."
         return 0
     fi
-    if [[ $gen == "legacy580" ]]; then
+    if [ "$gen" = "legacy580" ]; then
         branch_text=$'\n\n'"This card is from the Maxwell, Pascal or Volta generation (for example GeForce GTX 750, 900 or 10xx series). NVIDIA drivers 595 and newer no longer support it, so the helper keeps the driver on the 580 branch, the last one that does, by adding '>=x11-drivers/nvidia-drivers-581' to ${MASK_FILE}."
     fi
     if ! ui_yesno "This installs NVIDIA's proprietary driver:"$'\n\n'"1. Installs x11-drivers/nvidia-drivers (if your licence settings require it, you are asked to accept NVIDIA's licence)."$'\n'"2. Adds 'nvidia' to VIDEO_CARDS in /etc/portage/make.conf (a backup is kept)."$'\n'"3. Makes sure kernel mode setting is on (current drivers enable it by default; it matters for older branches and for Wayland)."$'\n'"4. Rebuilds the initramfs so the open-source nouveau driver no longer loads first.${branch_text}"$'\n\n'"A restart is needed afterwards. Continue?" y; then
         return 0
     fi
-    if [[ $gen == "legacy580" ]]; then
+    if [ "$gen" = "legacy580" ]; then
         add_settings "$MASK_FILE" ">=x11-drivers/nvidia-drivers-581" "NVIDIA card supported up to the 580 driver branch"
     fi
     install_packages "Install the NVIDIA driver" x11-drivers/nvidia-drivers || return 0
     add_video_card nvidia || note+=$'\n'"Could not update VIDEO_CARDS in /etc/portage/make.conf."
     if ! grep -rqsE "nvidia[-_]drm.*modeset=1" /etc/modprobe.d/ && [[ " $(cat /proc/cmdline) " != *"nvidia_drm.modeset=1"* && " $(cat /proc/cmdline) " != *"nvidia-drm.modeset=1"* ]]; then
-        if mkdir -p /etc/modprobe.d && printf '# Added by gentoo-helper: kernel mode setting for the NVIDIA driver\n# (default in current drivers; needed for older branches and Wayland)\noptions nvidia_drm modeset=1\n' >/etc/modprobe.d/nvidia-drm-modeset.conf; then
+        if mkdir -p /etc/modprobe.d && printf '# Added by gentoo_helper: kernel mode setting for the NVIDIA driver\n# (default in current drivers; needed for older branches and Wayland)\noptions nvidia_drm modeset=1\n' >/etc/modprobe.d/nvidia-drm-modeset.conf; then
             log "Wrote /etc/modprobe.d/nvidia-drm-modeset.conf"
         else
             note+=$'\n'"Could not write /etc/modprobe.d/nvidia-drm-modeset.conf."
@@ -1849,7 +1959,7 @@ task_nvidia() {
         note+=$'\n'"No distribution kernel was found, so the initramfs was not rebuilt. If you build your own kernel, rebuild its initramfs yourself."
     fi
     TITLE="NVIDIA driver"
-    ui_msg "The NVIDIA driver is installed.${note}"$'\n\n'"Restart the computer now. Afterwards, run 'Update the whole system' once so packages pick up the new VIDEO_CARDS setting."$'\n\n'"If the screen stays black after the restart, choose the previous kernel or boot entry, or switch to a text console with Ctrl+Alt+F2 and run gentoo-helper from there."
+    ui_msg "The NVIDIA driver is installed.${note}"$'\n\n'"Restart the computer now. Afterwards, run 'Update the whole system' once so packages pick up the new VIDEO_CARDS setting."$'\n\n'"If the screen stays black after the restart, choose the previous kernel or boot entry, or switch to a text console with Ctrl+Alt+F2 and run gentoo_helper from there."
 }
 
 task_codecs() {
@@ -1885,7 +1995,7 @@ task_ssh() {
             off "Turn the SSH server off"; then
             return 0
         fi
-        if [[ $CHOICE == "off" ]]; then
+        if [ "$CHOICE" = "off" ]; then
             svc_disable_now sshd
             ui_msg "The SSH server is stopped and will not start at boot any more."
         fi
@@ -1897,7 +2007,7 @@ task_ssh() {
     install_packages "SSH server" net-misc/openssh || return 0
     ssh-keygen -A >>"$LOG" 2>&1 || true
     svc_enable_now sshd || note+=$'\n'"The SSH service could not be started; see ${LOG}."
-    if have ufw && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then
+    if have ufw && [[ $(LC_ALL=C ufw status 2>/dev/null) = *"Status: active"* ]]; then
         ufw allow ssh >>"$LOG" 2>&1 && note+=$'\n'"The firewall now allows SSH connections."
     fi
     ui_msg "The SSH server is on and starts at every boot.${note}"$'\n\n'"From another computer on your network, connect with:"$'\n'"  ssh ${user:-yourname}@ADDRESS"$'\n\n'"This computer's addresses:"$'\n'"$(ip_addresses)"$'\n\n'"For more security, set up SSH keys and turn off password logins (Gentoo wiki page 'SSH')."
@@ -1906,7 +2016,7 @@ task_ssh() {
 task_firewall() {
     local status allow_ssh="no" f
     TITLE="Firewall"
-    if have ufw && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then
+    if have ufw && [[ $(LC_ALL=C ufw status 2>/dev/null) = *"Status: active"* ]]; then
         if ! ui_menu "The firewall (ufw) is on: incoming connections are blocked unless allowed." "status" \
             status "Show the firewall rules" \
             off "Turn the firewall off"; then
@@ -1915,11 +2025,11 @@ task_firewall() {
         case "$CHOICE" in
             status)
                 f=$(tmpfile)
-                ufw status verbose >"$f" 2>&1
+                ufw status verbose >"$f" 2>&1 || true
                 ui_file "$f" ;;
             off)
                 if ui_yesno "Turn the firewall off?" n; then
-                    ufw disable >>"$LOG" 2>&1
+                    ufw disable >>"$LOG" 2>&1 || true
                     svc_disable_now ufw
                     ui_msg "The firewall is off."
                 fi ;;
@@ -1934,13 +2044,13 @@ task_firewall() {
     {
         ufw default deny incoming
         ufw default allow outgoing
-        if [[ $allow_ssh == "yes" ]]; then ufw allow ssh; fi
+        if [ "$allow_ssh" = "yes" ]; then ufw allow ssh; fi
         ufw --force enable
-    } >>"$LOG" 2>&1
+    } >>"$LOG" 2>&1 || true
     svc_enable_now ufw || true
-    status=$(ufw status 2>/dev/null || true)
-    if [[ $status == *"Status: active"* ]]; then
-        ui_msg "The firewall is on and starts at every boot.$( [[ $allow_ssh == yes ]] && printf '%s' $'\n\n'"SSH connections are still allowed because the SSH server is running." )"
+    status=$(LC_ALL=C ufw status 2>/dev/null || true)
+    if [[ $status = *"Status: active"* ]]; then
+        ui_msg "The firewall is on and starts at every boot.$( [ "$allow_ssh" = yes ] && printf '%s' $'\n\n'"SSH connections are still allowed because the SSH server is running." )"
     else
         ui_msg "ufw is installed, but turning it on failed. The details are in ${LOG}."
     fi
@@ -1991,7 +2101,7 @@ task_vms() {
     local virt="no" note=""
     TITLE="Virtual machines"
     if grep -qwE "vmx|svm" /proc/cpuinfo; then virt="yes"; fi
-    if [[ $virt == "no" ]]; then
+    if [ "$virt" = "no" ]; then
         ui_msg "This CPU does not report hardware virtualization (Intel VT-x or AMD-V). It may be switched off in the firmware (BIOS/UEFI) settings, or this is already a virtual machine without nested virtualization. Virtual machines would run very slowly without it."
         ui_yesno "Install the virtual machine tools anyway?" n || return 0
     fi
@@ -2023,6 +2133,77 @@ task_steam() {
     fi
 }
 
+task_laptop() {
+    local sel note="" cpu tool kind thermal="off"
+    local -a items=() pkgs=()
+    TITLE="Laptop and Mac hardware"
+    cpu=$(awk -F': *' '/^vendor_id/ {print $2; exit}' /proc/cpuinfo)
+    kind=$(desktop_kind)
+    if pkg_installed sys-power/tlp; then tool="tlp"
+    elif pkg_installed sys-power/power-profiles-daemon; then tool="ppd"
+    elif [ "$kind" = "plasma" ] || [ "$kind" = "gnome" ]; then tool="ppd"
+    else tool="tlp"; fi
+    local text="Power and cooling for laptops and Macs."
+    if is_laptop; then
+        thermal="on"
+        if [ "$tool" = "ppd" ]; then
+            items+=(sys-power/power-profiles-daemon "Power profiles: power saving, balanced or performance from the battery menu" on)
+        else
+            items+=(sys-power/tlp "TLP: automatic power saving on battery (CPU, disks, Wi-Fi, USB)" on)
+        fi
+        text+=" power-profiles-daemon and TLP do the same job and cannot be installed together, so only one is offered: power-profiles-daemon for KDE Plasma and GNOME, which use it, and TLP otherwise."
+    fi
+    if [ "$cpu" = "GenuineIntel" ]; then
+        items+=(sys-power/thermald "thermald: keeps Intel CPUs from overheating" "$thermal")
+    fi
+    if is_apple; then
+        items+=(app-laptop/mbpfan "mbpfan: fan control for Intel Macs (testing version)" on)
+        text+=$'\n\n'"Linux does not control Intel Mac fans by itself. mbpfan does; Gentoo only has a testing (~amd64) version, so accept it when asked."
+    fi
+    if [ "$(gpu_count)" -ge 2 ]; then
+        items+=(sys-power/switcheroo-control "switcheroo-control: lets the desktop start programs on the dedicated graphics chip" on)
+    fi
+    if [ "${#items[@]}" -eq 0 ]; then
+        ui_msg "Nothing to set up: this does not look like a laptop or a Mac, and it has one graphics chip."
+        return 0
+    fi
+    if ! ui_checklist "${text}"$'\n\n'"Choose what to install:" "${items[@]}"; then return 0; fi
+    sel=$CHOICE
+    read -ra pkgs <<<"$sel"
+    if [ "${#pkgs[@]}" -eq 0 ]; then return 0; fi
+    install_packages "Laptop and Mac hardware" "${pkgs[@]}" || return 0
+    if [[ " $sel " = *" sys-power/power-profiles-daemon "* ]]; then
+        svc_enable_now power-profiles-daemon || note+=$'\n'"power-profiles-daemon could not be started; see ${LOG}."
+    fi
+    if [[ " $sel " = *" sys-power/tlp "* ]]; then
+        svc_enable_now tlp || note+=$'\n'"TLP could not be started; see ${LOG}."
+    fi
+    if [[ " $sel " = *" sys-power/thermald "* ]]; then
+        svc_enable_now thermald || note+=$'\n'"thermald could not be started; see ${LOG}."
+    fi
+    if [[ " $sel " = *" app-laptop/mbpfan "* ]]; then
+        mkdir -p /etc/modules-load.d
+        printf '%s\n' "# Sensors for mbpfan. Written by gentoo_helper" "applesmc" "coretemp" >/etc/modules-load.d/mbpfan.conf
+        modprobe applesmc >>"$LOG" 2>&1 || true
+        modprobe coretemp >>"$LOG" 2>&1 || true
+        svc_enable_now mbpfan || note+=$'\n'"mbpfan could not be started; see ${LOG}."
+    fi
+    if [[ " $sel " = *" sys-power/switcheroo-control "* ]]; then
+        svc_enable_now switcheroo-control || note+=$'\n'"switcheroo-control could not be started; see ${LOG}."
+    fi
+    TITLE="Laptop and Mac hardware"
+    ui_msg "Done.${note}"
+}
+
+task_firmware() {
+    TITLE="Firmware updates"
+    if ! ui_yesno "fwupd installs firmware updates published by hardware makers through the Linux Vendor Firmware Service (LVFS): system firmware (BIOS/UEFI) for many Dell, Lenovo, HP and Framework computers, plus SSDs, docks, keyboards and more. It never updates anything without asking."$'\n\n'"Install fwupd?" y; then
+        return 0
+    fi
+    install_packages "Firmware updates" sys-apps/fwupd || return 0
+    ui_msg "fwupd is installed. To check for and install updates, open a terminal and run:"$'\n\n'"  fwupdmgr refresh"$'\n'"  fwupdmgr get-updates"$'\n'"  fwupdmgr update"$'\n\n'"GNOME Software and KDE Discover also show firmware updates once fwupd is installed. Keep laptops plugged in while firmware updates."
+}
+
 tasks_menu() {
     local def="printing"
     while true; do
@@ -2033,6 +2214,8 @@ tasks_menu() {
             wifi "$(task_label wifi "Wi-Fi")"
             bluetooth "$(task_label bluetooth "Bluetooth")"
             graphics "Graphics drivers (NVIDIA, Intel video decoding)"
+            laptop "Laptop and Mac hardware (power saving, cooling, Mac fans)"
+            firmware "Firmware updates (fwupd)"
             codecs "$(task_label codecs "Audio and video codecs")"
             ssh "$(task_label ssh "SSH server (log in from other computers)")"
             firewall "$(task_label firewall "Firewall")"
@@ -2051,6 +2234,8 @@ tasks_menu() {
             wifi) task_wifi ;;
             bluetooth) task_bluetooth ;;
             graphics) task_graphics ;;
+            laptop) task_laptop ;;
+            firmware) task_firmware ;;
             codecs) task_codecs ;;
             ssh) task_ssh ;;
             firewall) task_firewall ;;
@@ -2105,9 +2290,10 @@ Configuration file updates
 
 Common tasks
   Ready-made recipes for printing, scanners, Wi-Fi, Bluetooth, graphics
-  drivers, codecs, the SSH server, a firewall, fonts, archive formats,
-  virtual machines and Steam: they install what is needed, switch on the
-  right services and add your user to the right groups.
+  drivers, laptop and Mac hardware, firmware updates, codecs, the SSH
+  server, a firewall, fonts, archive formats, virtual machines and Steam:
+  they install what is needed, switch on the right services and add your
+  user to the right groups.
 
 Flatpak
   An alternative for desktop apps: ready-made, sandboxed, updated
@@ -2128,20 +2314,22 @@ EOF
 
 usage() {
     cat <<EOF
-gentoo-helper ${VERSION}: simple menus for everyday Gentoo package management
+gentoo_helper ${VERSION}: simple menus for everyday Gentoo package management
 
-  gentoo-helper                  menus
-  gentoo-helper update           update the whole system
-  gentoo-helper install NAME     find and install a package
-  gentoo-helper remove NAME      remove a package
-  gentoo-helper clean            remove unneeded packages, free disk space
-  gentoo-helper news             read Gentoo news
-  gentoo-helper configs          review configuration file updates
-  gentoo-helper flatpak          Flatpak apps
-  gentoo-helper tasks            common tasks: printing, Wi-Fi, drivers, codecs, SSH, ...
-  gentoo-helper help             this text
+  gentoo_helper                  menus
+  gentoo_helper update           update the whole system
+  gentoo_helper install NAME     find and install a package
+  gentoo_helper remove NAME      remove a package
+  gentoo_helper clean            remove unneeded packages, free disk space
+  gentoo_helper news             read Gentoo news
+  gentoo_helper configs          review configuration file updates
+  gentoo_helper flatpak          Flatpak apps
+  gentoo_helper tasks            common tasks: printing, Wi-Fi, drivers, laptops, SSH, ...
+  gentoo_helper -t COMMAND       use plain text menus instead of dialog
+  gentoo_helper -h               this text
+  gentoo_helper -V               show the version
 
-Set GENTOO_HELPER_UI=text to use plain text menus instead of dialog.
+Setting GENTOO_HELPER_UI=text also selects plain text menus.
 EOF
 }
 
@@ -2180,52 +2368,96 @@ main_menu() {
 }
 
 ensure_gentoo() {
-    if [[ ! -f /etc/gentoo-release ]] || ! have emerge; then
-        echo "gentoo-helper only works on Gentoo Linux (emerge was not found)." >&2
+    if [ ! -f /etc/gentoo-release ] || ! have emerge; then
+        printf '%s\n' "gentoo_helper only works on Gentoo Linux (emerge was not found)." >&2
+        exit 1
+    fi
+}
+
+# Commands this helper cannot work without. Optional ones (dialog, flatpak,
+# lspci, ...) are checked where they are used.
+REQUIRED_COMMANDS=(emerge portageq eselect awk sed grep fold sort tr cut head tail wc df du find mktemp date id getent usermod python3)
+
+check_commands() {
+    local c
+    local -a missing=()
+    for c in "${REQUIRED_COMMANDS[@]}"; do
+        have "$c" || missing+=("$c")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        printf 'gentoo_helper needs these commands, which were not found: %s\n' "${missing[*]}" >&2
+        exit 1
+    fi
+}
+
+check_bash_version() {
+    if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+        printf 'gentoo_helper needs bash 4.4 or newer (this is bash %s).\n' "$BASH_VERSION" >&2
         exit 1
     fi
 }
 
 ensure_root() {
     local self
-    if [[ $EUID -eq 0 ]]; then return 0; fi
-    self=$(readlink -f "${BASH_SOURCE[0]}")
-    echo "Managing packages needs administrator rights; asking for your password."
+    if [ "$(id -u)" -eq 0 ]; then return 0; fi
+    self=$(self_path)
+    printf '%s\n' "Managing packages needs administrator rights; asking for your password."
     if have sudo; then exec sudo -- "$self" "$@"; fi
     if have doas; then exec doas -- "$self" "$@"; fi
-    echo "Neither sudo nor doas is available. Run gentoo-helper as root." >&2
+    printf '%s\n' "Neither sudo nor doas is available. Run gentoo_helper as root." >&2
     exit 1
 }
 
 ui_init() {
-    if [[ ${GENTOO_HELPER_UI:-} == "text" ]]; then UI="text"; return 0; fi
-    if [[ ! -t 0 || ! -t 1 ]]; then UI="text"; return 0; fi
+    if [ "${GENTOO_HELPER_UI:-}" = "text" ]; then UI="text"; return 0; fi
+    if [ ! -t 0 ] || [ ! -t 1 ]; then UI="text"; return 0; fi
     if have dialog; then UI="dialog"; return 0; fi
     UI="text"
-    if [[ -e ${STATE_DIR}/no-dialog ]]; then return 0; fi
+    if [ -e "${STATE_DIR}/no-dialog" ]; then return 0; fi
     TITLE="Gentoo Helper"
     if ui_yesno "The menus are easier to use with the small 'dialog' program, which is not installed yet. Install it now? (usually under a minute)" y; then
-        run_emerge dev-util/dialog
+        run_emerge dev-util/dialog || true
         if have dialog; then UI="dialog"; fi
     else
-        touch "${STATE_DIR}/no-dialog"
+        touch -- "${STATE_DIR}/no-dialog"
         say "OK, using plain text menus. (Install dev-util/dialog any time to get the other menus.)"
     fi
 }
 
 main() {
-    case "${1:-}" in
-        -h|--help|help) usage; return 0 ;;
-        --version) echo "gentoo-helper ${VERSION}"; return 0 ;;
-    esac
+    local opt arg
+    local -a orig=("$@") args=()
+    check_bash_version
+    # Long options are translated to short ones, then read with getopts.
+    for arg in "$@"; do
+        case "$arg" in
+            --help|help) args+=(-h) ;;
+            --version) args+=(-V) ;;
+            --text) args+=(-t) ;;
+            --*) usage >&2; return 1 ;;
+            *) args+=("$arg") ;;
+        esac
+    done
+    set -- "${args[@]}"
+    OPTIND=1
+    while getopts ':hVt' opt; do
+        case "$opt" in
+            h) usage; return 0 ;;
+            V) printf 'gentoo_helper %s\n' "$VERSION"; return 0 ;;
+            t) GENTOO_HELPER_UI="text" ;;
+            *) usage >&2; return 1 ;;
+        esac
+    done
+    shift $(( OPTIND - 1 ))
     ensure_gentoo
-    ensure_root "$@"
-    mkdir -p "$STATE_DIR"
-    touch "$LOG"
-    WORK_DIR=$(mktemp -d /tmp/gentoo-helper.XXXXXX)
+    check_commands
+    ensure_root "${orig[@]}"
+    mkdir -p -- "$STATE_DIR"
+    touch -- "$LOG"
+    WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gentoo_helper.XXXXXX")
     trap cleanup EXIT
-    trap 'cleanup; echo; exit 130' INT
-    log "gentoo-helper ${VERSION} started: $*"
+    trap 'cleanup; printf "\n"; exit 130' INT
+    log "gentoo_helper ${VERSION} started: $*"
     ui_init
     local cmd=${1:-}
     if (( $# > 0 )); then shift; fi
@@ -2241,9 +2473,9 @@ main() {
         tasks) tasks_menu ;;
         *) usage; return 1 ;;
     esac
-    if [[ $UI == "dialog" ]]; then clear_screen; fi
+    if [ "$UI" = "dialog" ]; then clear_screen; fi
 }
 
-if [[ "${BASH_SOURCE[0]:-}" == "$0" || -z "${BASH_SOURCE[0]:-}" ]]; then
+if [ "${BASH_SOURCE[0]:-}" = "$0" ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
     main "$@"
 fi

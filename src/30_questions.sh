@@ -4,24 +4,24 @@
 # ----------------------------------------------------------------------------
 de_label() {
     case "$1" in
-        plasma) echo "KDE Plasma" ;;
-        gnome) echo "GNOME" ;;
-        cinnamon) echo "Cinnamon" ;;
-        xfce) echo "Xfce" ;;
-        mate) echo "MATE" ;;
-        lxqt) echo "LXQt" ;;
-        sway) echo "Sway" ;;
-        i3) echo "i3" ;;
-        *) echo "No desktop (console only)" ;;
+        plasma) printf '%s\n' "KDE Plasma" ;;
+        gnome) printf '%s\n' "GNOME" ;;
+        cinnamon) printf '%s\n' "Cinnamon" ;;
+        xfce) printf '%s\n' "Xfce" ;;
+        mate) printf '%s\n' "MATE" ;;
+        lxqt) printf '%s\n' "LXQt" ;;
+        sway) printf '%s\n' "Sway" ;;
+        i3) printf '%s\n' "i3" ;;
+        *) printf '%s\n' "No desktop (console only)" ;;
     esac
 }
 
 default_dm_for() {
     case "$1" in
-        plasma|lxqt) echo "sddm" ;;
-        gnome) echo "gdm" ;;
-        xfce|cinnamon|mate|i3) echo "lightdm" ;;
-        *) echo "none" ;;
+        plasma|lxqt) printf '%s\n' "sddm" ;;
+        gnome) printf '%s\n' "gdm" ;;
+        xfce|cinnamon|mate|i3) printf '%s\n' "lightdm" ;;
+        *) printf '%s\n' "none" ;;
     esac
 }
 
@@ -46,13 +46,13 @@ q_system_type() {
     def_sway=$(yn_default SWAY_AUTOSTART y)
     DM="none"
     SWAY_AUTOSTART="no"
-    if [[ $DE == "sway" ]]; then
+    if [ "$DE" = "sway" ]; then
         say "Sway is started from the text console instead of a graphical login screen. The installer can start it automatically when your user logs in on the first console (tty1), which is the usual setup."
         ask_yn SWAY_AUTOSTART "Start Sway automatically after logging in on tty1?" "$def_sway"
-    elif [[ $DE != "none" ]]; then
+    elif [ "$DE" != "none" ]; then
         local def_dm def_yn="y"
         def_dm=$(default_dm_for "$DE")
-        if [[ $DE == "$prev_de" && $prev_dm == "none" ]]; then def_yn="n"; fi
+        if [ "$DE" = "$prev_de" ] && [ "$prev_dm" = "none" ]; then def_yn="n"; fi
         say "A display manager is the graphical login screen shown at boot. For $(de_label "$DE") the installer uses ${def_dm}. Without one, you log in on a text console and start the desktop yourself."
         if yesno "Install the graphical login screen (${def_dm})?" "$def_yn"; then DM=$def_dm; fi
     fi
@@ -62,12 +62,12 @@ q_system_type() {
         "OpenRC is Gentoo's traditional default: simple, script based and lightweight. systemd is what most other distributions use and brings more integrated tooling (journald logs, timers, per-user services). Both are fully supported by Gentoo." \
         "Gentoo announced its binary package host with desktop packages built for the Plasma/systemd and GNOME/systemd profiles, so for those two desktops systemd is likely to get more ready-made binaries and less compiling."
     local def_init="openrc"
-    if [[ $DE == "plasma" || $DE == "gnome" ]]; then def_init="systemd"; fi
-    if [[ $DE == "$prev_de" && -n $INIT ]]; then def_init=$INIT; fi
+    if [ "$DE" = "plasma" ] || [ "$DE" = "gnome" ]; then def_init="systemd"; fi
+    if [ "$DE" = "$prev_de" ] && [ -n "$INIT" ]; then def_init=$INIT; fi
     choose INIT "Init system" "$def_init" \
         "openrc|OpenRC: Gentoo's traditional init system" \
         "systemd|systemd: the init system used by most distributions"
-    if [[ $DE == "gnome" && $INIT == "openrc" ]]; then
+    if [ "$DE" = "gnome" ] && [ "$INIT" = "openrc" ]; then
         warn "GNOME is developed against systemd. On OpenRC it runs through elogind and works, but some features (for example parts of the Settings panels) may be limited."
         if yesno "Switch to systemd for GNOME?" y; then INIT="systemd"; fi
     fi
@@ -78,14 +78,14 @@ q_system_type() {
         "Recommended: yes. You can switch to building everything from source at any time later."
     ask_yn USE_BINPKG "Use Gentoo's official binary packages?" "$(yn_default USE_BINPKG y)"
     BINHOST_V3="no"
-    if [[ $USE_BINPKG == "yes" && $CPU_X86_64_V3 == "yes" ]]; then
+    if [ "$USE_BINPKG" = "yes" ] && [ "$CPU_X86_64_V3" = "yes" ]; then
         BINHOST_V3="yes"
         info "Your CPU supports x86-64-v3 (AVX2 generation), so x86-64-v3 binaries will be preferred, with baseline x86-64 as the fallback."
     fi
 
     subsection "CPU instruction set flags"
     say "CPU_FLAGS_X86 tells packages which instruction set extensions (SSE4.2, AVX2, AES and so on) they may use. The Handbook recommends detecting the exact set of this CPU with the cpuid2cpuflags tool, and the installer can do that."
-    if [[ $USE_BINPKG == "yes" ]]; then
+    if [ "$USE_BINPKG" = "yes" ]; then
         say "Trade-off with binary packages: Portage only uses a binary when its flags match yours. Packages that use CPU_FLAGS_X86 (mostly media codecs, crypto and maths libraries) will therefore be compiled locally when this CPU's set differs from what the binaries were built with. You get code tuned to this CPU at the cost of extra compile time."
     fi
     ask_yn TUNE_CPU_FLAGS "Detect and use this CPU's exact instruction set flags?" "$(yn_default TUNE_CPU_FLAGS y)"
@@ -102,9 +102,9 @@ q_disk() {
     local live d size model tran
     local -a opts=()
     live=$(live_media_disk)
-    while read -r d; do
-        [[ -n $d ]] || continue
-        if [[ $d == "$live" ]]; then
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        if [ "$d" = "$live" ]; then
             info "Skipping ${d}: the live image was booted from it."
             continue
         fi
@@ -113,7 +113,10 @@ q_disk() {
         tran=$(lsblk_field TRAN "$d")
         opts+=("${d}|${d}   ${size}   ${model:-unknown model}${tran:+   (${tran})}")
     done < <(list_disks)
-    if (( ${#opts[@]} == 0 )); then
+    if [ "${#opts[@]}" -eq 0 ]; then
+        if has_raid_controller; then
+            die "No usable disks were found, but this computer has a RAID controller. Many laptops and desktops ship with the disk controller set to 'RAID', 'Intel RST' or 'VMD' mode, which hides the disks from Linux. Switch it to 'AHCI' (and turn VMD off) in the firmware setup. If Windows is installed on this computer, read how to switch it safely first, or Windows may stop booting."
+        fi
         die "No usable disks were found. Check that the disk is connected and visible in 'lsblk'."
     fi
     say "Pick the disk to install Gentoo on. Double check the size and model: the wrong choice can destroy data on another disk."
@@ -125,29 +128,29 @@ q_disk() {
         bytes=${bytes%%$'\n'*}
         gib=$(( ${bytes:-0} / 1073741824 ))
         if (( gib >= need )); then break; fi
-        warn "${DISK} has ${gib} GiB, but this installation needs at least ${need} GiB ($( [[ $DE == none ]] && echo "without a desktop" || echo "with a desktop: the desktop, the package downloads and temporary build files need the room" )). Pick another disk, or quit and give the machine a larger disk."
+        warn "${DISK} has ${gib} GiB, but this installation needs at least ${need} GiB ($( [ "$DE" = none ] && printf '%s\n' "without a desktop" || printf '%s\n' "with a desktop: the desktop, the package downloads and temporary build files need the room" )). Pick another disk, or quit and give the machine a larger disk."
     done
 
     say_pre "$(printf '  Current contents of %s:\n' "$DISK"; lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null | sed 's/^/    /')"
-    if (( gib < 60 )) && [[ $DE != "none" ]]; then
+    if (( gib < 60 )) && [ "$DE" != "none" ]; then
         info "${DISK} has ${gib} GiB. That is enough to install, but 60 GiB or more leaves comfortable room for updates, which on Gentoo sometimes compile large packages."
     fi
     IS_SSD="no"
-    if [[ $(cat "/sys/block/${DISK##*/}/queue/rotational" 2>/dev/null || echo 1) == "0" ]]; then IS_SSD="yes"; fi
+    if [ "$(cat "/sys/block/${DISK##*/}/queue/rotational" 2>/dev/null || printf '%s\n' 1)" = "0" ]; then IS_SSD="yes"; fi
 }
 
 # Minimum size in GiB for the target disk or root partition.
 min_root_gib() {
-    if [[ $DE == "none" ]]; then echo "$MIN_DISK_GIB"; else echo "$MIN_DESKTOP_DISK_GIB"; fi
+    if [ "$DE" = "none" ]; then printf '%s\n' "$MIN_DISK_GIB"; else printf '%s\n' "$MIN_DESKTOP_DISK_GIB"; fi
 }
 
 # Size in GiB of the disk (automatic layout) or root partition (manual layout).
 target_root_gib() {
     local dev=$DISK bytes
-    if [[ $PART_MODE == "manual" ]]; then dev=$ROOT_PART; fi
+    if [ "$PART_MODE" = "manual" ]; then dev=$ROOT_PART; fi
     bytes=$(lsblk -bdno SIZE "$dev" 2>/dev/null || true)
     bytes=${bytes%%$'\n'*}
-    echo $(( ${bytes:-0} / 1073741824 ))
+    printf '%s\n' $(( ${bytes:-0} / 1073741824 ))
 }
 
 q_part_mode() {
@@ -156,6 +159,29 @@ q_part_mode() {
     choose PART_MODE "Partitioning" "${PART_MODE:-auto}" \
         "auto|Erase the whole disk and partition it automatically (recommended)" \
         "manual|Use partitions I choose (dual boot or custom layout)"
+}
+
+# Partition table for the automatic layout. UEFI always uses GPT. In BIOS mode
+# GPT works on nearly every computer, but some older BIOSes refuse to start
+# from a GPT disk, and Macs only start BIOS-mode systems from an MBR disk.
+q_partition_table() {
+    local gib
+    if [ "$BOOT_MODE" = "uefi" ]; then PTABLE="gpt"; return 0; fi
+    if [ "$PART_MODE" = "manual" ]; then return 0; fi
+    gib=$(target_root_gib)
+    if [ "$IS_APPLE" = "yes" ] && [ "$gib" -lt 2048 ]; then
+        PTABLE="mbr"
+        info "Apple Mac in BIOS mode: the disk gets an MBR partition table, which the Mac's legacy boot needs."
+        return 0
+    fi
+    if [ "$gib" -ge 2048 ]; then
+        PTABLE="gpt"
+        return 0
+    fi
+    say "GPT is the modern partition table and works with nearly every BIOS. MBR is the older format: pick it only if this computer's BIOS does not start from a GPT disk (some machines from before about 2010 do not). MBR is limited to disks of 2 TiB."
+    choose PTABLE "Partition table" "${PTABLE:-gpt}" \
+        "gpt|GPT (recommended)" \
+        "mbr|MBR (for old BIOSes that do not boot GPT disks)"
 }
 
 q_filesystem() {
@@ -179,7 +205,7 @@ q_encryption() {
         "If you forget the passphrase, the data is gone for good. Nobody can recover it." \
         "Keyboard note: the passphrase prompt at boot may use the US layout. A passphrase made of letters, digits and spaces that sit in the same place on a US keyboard is the safest choice if your layout is different."
     ask_yn ENCRYPT "Encrypt the root partition?" "$def"
-    if [[ $ENCRYPT == "yes" ]]; then
+    if [ "$ENCRYPT" = "yes" ]; then
         ask_password LUKS_PASSWORD "disk encryption passphrase" 8
     fi
 }
@@ -190,7 +216,7 @@ q_swap() {
         "zram (recommended) creates compressed swap inside RAM. It is fast, uses no disk space, and fits desktops well. Its size will be ${ram_cap} GiB (equal to RAM, capped at 8 GiB, the same rule Fedora uses); it only consumes memory for what is actually swapped." \
         "A swap partition uses disk space. Hibernation needs one, but this installer does not set up hibernation."
     local -a opts=("zram|zram: compressed swap in RAM (recommended)")
-    if [[ $ENCRYPT == "yes" ]]; then
+    if [ "$ENCRYPT" = "yes" ]; then
         info "A swap partition is not offered with encryption: an unencrypted swap partition could leak the contents of memory to disk."
     else
         opts+=("partition|A swap partition on the disk")
@@ -199,15 +225,20 @@ q_swap() {
     choose SWAP_MODE "Swap" "${SWAP_MODE:-zram}" "${opts[@]}"
     local prev_size=$SWAP_SIZE_GIB
     SWAP_SIZE_GIB=""
-    if [[ $SWAP_MODE == "partition" && $PART_MODE == "auto" ]]; then
+    if [ "$SWAP_MODE" = "partition" ] && [ "$PART_MODE" = "auto" ]; then
         ask SWAP_SIZE_GIB "Swap partition size in GiB" "${prev_size:-$ram_cap}" valid_positive_int
     fi
 }
 
 q_bootloader() {
-    if [[ $BOOT_MODE == "bios" ]]; then
+    if [ "$BOOT_MODE" = "bios" ]; then
         BOOTLOADER="grub"
         info "Legacy BIOS mode: the GRUB bootloader will be used."
+        return 0
+    fi
+    if [ "$UEFI_BITS" = "32" ]; then
+        BOOTLOADER="grub"
+        info "32-bit UEFI firmware: the GRUB bootloader (32-bit EFI version) will be used."
         return 0
     fi
     say "The bootloader shows the boot menu and starts the kernel." \
@@ -224,11 +255,11 @@ pick_partition() {
     local __live name size fstype ptype label pk
     local -a __opts=()
     __live=$(live_media_disk)
-    while read -r name; do
-        [[ -n $name ]] || continue
-        if [[ " $__used " == *" $name "* ]]; then continue; fi
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        if [[ " $__used " = *" $name "* ]]; then continue; fi
         pk=$(lsblk_field PKNAME "$name")
-        if [[ -n $__live && "/dev/$pk" == "$__live" ]]; then continue; fi
+        if [ -n "$__live" ] && [ "/dev/$pk" = "$__live" ]; then continue; fi
         size=$(lsblk_field SIZE "$name")
         fstype=$(lsblk_field FSTYPE "$name")
         ptype=$(lsblk_field PARTTYPENAME "$name")
@@ -247,16 +278,16 @@ pick_partition() {
 
 q_manual_partitions() {
     local -a req=()
-    if [[ $BOOT_MODE == "uefi" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
         req+=("An EFI system partition (FAT32). An existing one, for example from Windows, can be reused without formatting. With systemd-boot it holds the kernels, so 1 GiB is recommended.")
     else
-        req+=("On a GPT disk: a 1 MiB partition of type 'BIOS boot' on the disk that holds the root partition (GRUB stores itself there).")
+        req+=("On a GPT disk: a 1 MiB partition of type 'BIOS boot' on the disk that holds the root partition (GRUB stores itself there). An MBR disk needs no extra partition, but leave 1 MiB free before the first partition (cfdisk does that by default).")
     fi
-    if [[ $NEED_BOOT_PART == "yes" ]]; then
-        req+=("A separate /boot partition of at least 512 MiB (1 GiB recommended). It will be formatted as ext4, because GRUB cannot read the root filesystem you chose ($( [[ $ENCRYPT == yes ]] && echo "encrypted" || echo "XFS with current default features" )).")
+    if [ "$NEED_BOOT_PART" = "yes" ]; then
+        req+=("A separate /boot partition of at least 512 MiB (1 GiB recommended). It will be formatted as ext4, because GRUB cannot read the root filesystem you chose ($( [ "$ENCRYPT" = yes ] && printf '%s\n' "encrypted" || printf '%s\n' "XFS with current default features" )).")
     fi
     req+=("A root partition of at least ${MIN_DISK_GIB} GiB (40 GiB or more for a desktop). It will be formatted.")
-    if [[ $SWAP_MODE == "partition" ]]; then req+=("A swap partition. It will be formatted as swap."); fi
+    if [ "$SWAP_MODE" = "partition" ]; then req+=("A swap partition. It will be formatted as swap."); fi
 
     say "Manual partitioning. You need:"
     local r
@@ -273,14 +304,14 @@ q_manual_partitions() {
 
     local used="" fstype bytes prev_esp=$ESP_PART
     ESP_PART=""; BOOT_PART=""; SWAP_PART=""; BIOS_PART=""; FORMAT_ESP="no"
-    if [[ $BOOT_MODE == "uefi" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
         pick_partition ESP_PART "Which partition is the EFI system partition?" "$used"
         used+=" $ESP_PART"
         fstype=$(lsblk_field FSTYPE "$ESP_PART")
-        if [[ $fstype == "vfat" ]]; then
+        if [ "$fstype" = "vfat" ]; then
             say "${ESP_PART} already contains a FAT filesystem. If another operating system boots from it (Windows, another Linux), keep it: Gentoo's boot files are simply added next to the existing ones."
             local def_fmt="n"
-            if [[ $FORMAT_ESP == "yes" && $ESP_PART == "$prev_esp" ]]; then def_fmt="y"; fi
+            if [ "$FORMAT_ESP" = "yes" ] && [ "$ESP_PART" = "$prev_esp" ]; then def_fmt="y"; fi
             ask_yn FORMAT_ESP "Format ${ESP_PART}? (answer no to keep the existing boot files)" "$def_fmt"
         else
             warn "${ESP_PART} has no FAT filesystem, so it will be formatted as FAT32."
@@ -290,11 +321,11 @@ q_manual_partitions() {
         bytes=${bytes%%$'\n'*}
         if (( bytes < 300 * 1048576 )); then
             warn "${ESP_PART} is smaller than 300 MiB. That is too small for kernels and may even be tight for GRUB."
-        elif [[ $BOOTLOADER == "systemd-boot" ]] && (( bytes < 900 * 1048576 )); then
+        elif [ "$BOOTLOADER" = "systemd-boot" ] && (( bytes < 900 * 1048576 )); then
             warn "With systemd-boot, kernels and initramfs images live on the EFI partition. ${ESP_PART} holds only room for one or two kernels; consider GRUB instead."
         fi
     fi
-    if [[ $NEED_BOOT_PART == "yes" ]]; then
+    if [ "$NEED_BOOT_PART" = "yes" ]; then
         pick_partition BOOT_PART "Which partition should become /boot? (it will be formatted as ext4)" "$used"
         used+=" $BOOT_PART"
     fi
@@ -308,7 +339,7 @@ q_manual_partitions() {
         warn "${ROOT_PART} has $(( ${bytes:-0} / 1073741824 )) GiB; this installation needs at least ${need} GiB for the root filesystem. Pick a larger partition (or enlarge it with cfdisk and run the installer again)."
     done
     used+=" $ROOT_PART"
-    if [[ $SWAP_MODE == "partition" ]]; then
+    if [ "$SWAP_MODE" = "partition" ]; then
         pick_partition SWAP_PART "Which partition should be used as swap? (it will be formatted)" "$used"
         used+=" $SWAP_PART"
     fi
@@ -316,9 +347,9 @@ q_manual_partitions() {
 
     DISK="/dev/$(lsblk_field PKNAME "$ROOT_PART")"
     GRUB_DISK=""
-    if [[ $BOOT_MODE == "bios" ]]; then
+    if [ "$BOOT_MODE" = "bios" ]; then
         GRUB_DISK=$DISK
-        if [[ $(lsblk_field PTTYPE "$GRUB_DISK") == "gpt" ]]; then
+        if [ "$(lsblk_field PTTYPE "$GRUB_DISK")" = "gpt" ]; then
             local ptypes
             ptypes=$(lsblk -lno PARTTYPE "$GRUB_DISK" 2>/dev/null || true)
             if ! grep -qi "${GUID_BIOS}" <<<"$ptypes"; then
@@ -326,28 +357,35 @@ q_manual_partitions() {
             fi
         fi
     fi
+    PTABLE="gpt"
+    if [ "$(lsblk_field PTTYPE "$DISK")" = "dos" ]; then PTABLE="mbr"; fi
     DUAL_BOOT="yes"
     IS_SSD="no"
-    if [[ $(cat "/sys/block/${DISK##*/}/queue/rotational" 2>/dev/null || echo 1) == "0" ]]; then IS_SSD="yes"; fi
+    if [ "$(cat "/sys/block/${DISK##*/}/queue/rotational" 2>/dev/null || printf '%s\n' 1)" = "0" ]; then IS_SSD="yes"; fi
 }
 
 show_auto_layout() {
     local n=1 fsdesc b
     fsdesc="$FS"
-    if [[ $ENCRYPT == "yes" ]]; then fsdesc="$FS inside LUKS2 encryption"; fi
-    if [[ $FS == "btrfs" ]]; then fsdesc+=", subvolumes @ (/) and @home (/home)"; fi
-    b="  Planned layout for ${DISK} (GPT partition table):"$'\n'
-    if [[ $BOOT_MODE == "uefi" ]]; then
-        printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 GiB" "EFI system partition, FAT32, mounted at /efi"
+    if [ "$ENCRYPT" = "yes" ]; then fsdesc="$FS inside LUKS2 encryption"; fi
+    if [ "$FS" = "btrfs" ]; then fsdesc+=", subvolumes @ (/) and @home (/home)"; fi
+    if [ "$PTABLE" = "mbr" ]; then
+        b="  Planned layout for ${DISK} (MBR partition table):"$'\n'
     else
-        printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 MiB" "BIOS boot partition (used by GRUB, no filesystem)"
+        b="  Planned layout for ${DISK} (GPT partition table):"$'\n'
     fi
-    n=$(( n + 1 ))
-    if [[ $NEED_BOOT_PART == "yes" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 GiB" "EFI system partition, FAT32, mounted at /efi"
+        n=$(( n + 1 ))
+    elif [ "$PTABLE" = "gpt" ]; then
+        printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 MiB" "BIOS boot partition (used by GRUB, no filesystem)"
+        n=$(( n + 1 ))
+    fi
+    if [ "$NEED_BOOT_PART" = "yes" ]; then
         printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 GiB" "boot partition, ext4, mounted at /boot"
         n=$(( n + 1 ))
     fi
-    if [[ $SWAP_MODE == "partition" ]]; then
+    if [ "$SWAP_MODE" = "partition" ]; then
         printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "${SWAP_SIZE_GIB} GiB" "swap"
         n=$(( n + 1 ))
     fi
@@ -362,18 +400,19 @@ q_disk_layout() {
     section "Part 2 of 6: Disk and filesystems"
     q_disk
     q_part_mode
+    q_partition_table
     q_filesystem
     q_encryption
     q_swap
     q_bootloader
     NEED_BOOT_PART="no"
-    if [[ $BOOTLOADER == "grub" ]] && [[ $ENCRYPT == "yes" || $FS == "xfs" ]]; then
+    if [ "$BOOTLOADER" = "grub" ] && { [ "$ENCRYPT" = "yes" ] || [ "$FS" = "xfs" ]; }; then
         NEED_BOOT_PART="yes"
-        if [[ $FS == "xfs" && $ENCRYPT == "no" ]]; then
+        if [ "$FS" = "xfs" ] && [ "$ENCRYPT" = "no" ]; then
             info "GRUB plus XFS: a separate ext4 /boot partition is used, because GRUB may not read XFS filesystems created with the newest default features."
         fi
     fi
-    if [[ $PART_MODE == "manual" ]]; then
+    if [ "$PART_MODE" = "manual" ]; then
         q_manual_partitions
     else
         show_auto_layout
@@ -408,7 +447,7 @@ xkb_from_keymap() {
     esac
 }
 
-ask_timezone() {
+cli_ask_timezone() {
     say "The timezone sets your local time. Use the Region/City form, for example America/New_York, Europe/London or Asia/Tokyo. Type 'list' to browse."
     ask TIMEZONE "Timezone" "${TIMEZONE:-UTC}" valid_timezone
 }
@@ -428,16 +467,16 @@ q_region() {
     local prev_keymap=$KEYMAP prev_xkb=$XKB_LAYOUT prev_var=$XKB_VARIANT
     ask KEYMAP "Console keymap" "${KEYMAP:-us}" valid_keymap
 
-    if [[ $DE != "none" ]]; then
+    if [ "$DE" != "none" ]; then
         xkb_from_keymap "$KEYMAP"
-        if [[ $KEYMAP == "$prev_keymap" && -n $prev_xkb ]]; then
+        if [ "$KEYMAP" = "$prev_keymap" ] && [ -n "$prev_xkb" ]; then
             XKB_LAYOUT=$prev_xkb
             XKB_VARIANT=$prev_var
         fi
         say "The graphical keyboard layout (XKB) is used by the desktop. It is derived from your console keymap. Plasma and GNOME also let you change it later in their settings."
         local def=$XKB_LAYOUT
         ask XKB_LAYOUT "Desktop keyboard layout (XKB name, for example us, gb, de, fr)" "$def" valid_xkb_layout
-        if [[ $XKB_LAYOUT != "$def" ]]; then XKB_VARIANT=""; fi
+        if [ "$XKB_LAYOUT" != "$def" ]; then XKB_VARIANT=""; fi
     fi
 }
 
@@ -461,7 +500,7 @@ q_accounts() {
     case "$USER_SHELL" in
         fish|nushell)
             say "$(shell_field "$USER_SHELL" 4 | cut -d' ' -f1) is not a POSIX shell: commands copied from guides sometimes need changes. It also does not read /etc/profile, so environment settings that Gentoo packages add there (for example extra PATH entries) are missing in its login sessions unless you add them to its own configuration. It is written in Rust and is compiled from source if no binary package is available, which can take a while."
-            if [[ $USER_SHELL == "nushell" && $DE == "sway" ]]; then
+            if [ "$USER_SHELL" = "nushell" ] && [ "$DE" = "sway" ]; then
                 say "Sway is not started automatically after login with Nushell. Type 'sway' after logging in on the first console."
             fi
             ;;
@@ -477,12 +516,12 @@ q_accounts() {
 
 compute_video_cards() {
     local vc=""
-    if [[ $HAS_INTEL == "yes" ]]; then vc+=" intel"; fi
-    if [[ $HAS_AMD == "yes" ]]; then vc+=" amdgpu radeonsi"; fi
-    if [[ $HAS_NVIDIA == "yes" ]]; then
-        if [[ $GPU_DRIVER == "nvidia" ]]; then vc+=" nvidia"; else vc+=" nouveau"; fi
+    if [ "$HAS_INTEL" = "yes" ]; then vc+=" intel"; fi
+    if [ "$HAS_AMD" = "yes" ]; then vc+=" amdgpu radeonsi"; fi
+    if [ "$HAS_NVIDIA" = "yes" ]; then
+        if [ "$GPU_DRIVER" = "nvidia" ]; then vc+=" nvidia"; else vc+=" nouveau"; fi
     fi
-    if [[ -n $GPU_VM ]]; then vc+=" $GPU_VM"; fi
+    if [ -n "$GPU_VM" ]; then vc+=" $GPU_VM"; fi
     VIDEO_CARDS=$(trim "$vc")
 }
 
@@ -490,9 +529,9 @@ q_hardware_network() {
     section "Part 5 of 6: Drivers, network and services"
 
     local prev_gpu=$GPU_DRIVER def_gpu="nvidia"
-    if [[ $prev_gpu == "nouveau" ]]; then def_gpu="nouveau"; fi
+    if [ "$prev_gpu" = "nouveau" ]; then def_gpu="nouveau"; fi
     GPU_DRIVER="mesa"
-    if [[ $HAS_NVIDIA == "yes" ]]; then
+    if [ "$HAS_NVIDIA" = "yes" ]; then
         case "$NVIDIA_GEN" in
             unsupported)
                 say "An older NVIDIA graphics card was detected (Kepler generation or earlier, such as most GeForce GTX 600 and 700 series cards)." \
@@ -519,47 +558,96 @@ q_hardware_network() {
         esac
     fi
     compute_video_cards
-    if [[ -n $VIDEO_CARDS ]]; then
+    if [ -n "$VIDEO_CARDS" ]; then
         info "Graphics drivers (VIDEO_CARDS) set from the detected hardware: ${VIDEO_CARDS}"
     else
         warn "No known graphics hardware was detected, so VIDEO_CARDS is left empty (a basic framebuffer driver will be used)."
     fi
-    if [[ $HAS_AMD == "yes" ]]; then
+    if [ "$HAS_AMD" = "yes" ]; then
         say "Note: amdgpu/radeonsi covers AMD cards from the GCN generation (Radeon HD 7000, 2012) onward. For older Radeon cards, add 'radeon r600' to VIDEO_CARDS in /etc/portage/make.conf after installing."
     fi
 
     subsection "Networking"
     local def_net="networkmanager"
-    if [[ $DE == "none" && $HAS_WIFI == "no" ]]; then def_net="dhcpcd"; fi
+    if [ "$DE" = "none" ] && [ "$HAS_WIFI" = "no" ]; then def_net="dhcpcd"; fi
     say "This decides how the installed system connects to the network."
     local -a nopts=("networkmanager|NetworkManager: wired and Wi-Fi, a network icon in desktops, 'nmtui' in a terminal (recommended)"
                     "dhcpcd|dhcpcd: minimal, for wired Ethernet only (no Wi-Fi setup)")
-    if [[ $INIT == "systemd" ]]; then
+    if [ "$INIT" = "systemd" ]; then
         nopts+=("networkd|systemd-networkd: built into systemd, for wired Ethernet only")
     fi
     choose NET_TOOL "Network manager" "${NET_TOOL:-$def_net}" "${nopts[@]}"
-    if [[ $HAS_WIFI == "yes" && $NET_TOOL != "networkmanager" ]]; then
+    if [ "$HAS_WIFI" = "yes" ] && [ "$NET_TOOL" != "networkmanager" ]; then
         warn "This machine has Wi-Fi, but ${NET_TOOL} as configured here only handles wired connections. You would have to set up Wi-Fi yourself after installing."
     fi
 
     subsection "Other hardware and services"
     local def_bt="n"
-    if [[ $HAS_BT == "yes" ]]; then def_bt="y"; fi
-    say "Bluetooth support installs BlueZ and enables its service$( [[ $HAS_BT == yes ]] && echo " (a Bluetooth adapter was detected)" )."
+    if [ "$HAS_BT" = "yes" ]; then def_bt="y"; fi
+    say "Bluetooth support installs BlueZ and enables its service$( [ "$HAS_BT" = yes ] && printf '%s\n' " (a Bluetooth adapter was detected)" )."
     ask_yn WANT_BT "Install Bluetooth support?" "$(yn_default WANT_BT "$def_bt")"
 
     local def_cups
     def_cups=$(yn_default WANT_CUPS n)
     WANT_CUPS="no"
-    if [[ $DE != "none" ]]; then
+    if [ "$DE" != "none" ]; then
         say "CUPS is the printing system. Only needed if you print from this computer."
         ask_yn WANT_CUPS "Install printer support (CUPS)?" "$def_cups"
     fi
 
     local def_ssh="n"
-    if [[ $DE == "none" ]]; then def_ssh="y"; fi
+    if [ "$DE" = "none" ]; then def_ssh="y"; fi
     say "An SSH server lets you log in to this machine remotely over the network. Useful for servers; not needed on a typical desktop."
     ask_yn WANT_SSH "Enable the SSH server?" "$(yn_default WANT_SSH "$def_ssh")"
+
+    q_special_hardware
+}
+
+# Questions that only appear on hardware that needs them: Broadcom Wi-Fi,
+# laptop power management and Mac fan control.
+q_special_hardware() {
+    local def
+    def=$(yn_default WANT_BCM_WL y)
+    WANT_BCM_WL="no"
+    if [ "$BCM_WIFI" = "wl" ] && [ "$VIRT" = "none" ]; then
+        subsection "Broadcom Wi-Fi"
+        say "This computer's Broadcom Wi-Fi card (BCM4360, BCM4352, BCM43142 or BCM43228, found in most Macs from 2013 on and some PC laptops) only works with Broadcom's own 'wl' driver." \
+            "Gentoo packages it as net-wireless/broadcom-sta. It is proprietary, and Gentoo only has a testing (~amd64) version of it, because Broadcom stopped maintaining it years ago and it depends on community patches to build against new kernels. The installer would accept that one package's testing version and its Broadcom licence. It is compiled for the installed kernel and rebuilt automatically when the kernel updates." \
+            "Without it this card does not work; a USB Wi-Fi adapter or a wired connection works instead."
+        ask_yn WANT_BCM_WL "Install the Broadcom wl Wi-Fi driver?" "$def"
+    elif [ "$BCM_WIFI" = "b43" ] && [ "$VIRT" = "none" ]; then
+        info "Broadcom Wi-Fi card found that uses the b43 driver: its firmware (sys-firmware/b43-firmware) will be installed."
+    fi
+
+    def=$(yn_default WANT_POWER y)
+    WANT_POWER="no"
+    POWER_TOOL=""
+    if [ "$IS_LAPTOP" = "yes" ]; then
+        subsection "Laptop power management"
+        case "$DE" in
+            plasma|gnome)
+                POWER_TOOL="ppd"
+                say "power-profiles-daemon lets you switch between power saving, balanced and performance modes from $(de_label "$DE")'s battery menu. It is what $(de_label "$DE") is built to use." ;;
+            *)
+                POWER_TOOL="tlp"
+                say "TLP applies power saving settings automatically (CPU, disks, Wi-Fi, USB, PCIe), with separate settings on battery and on mains power. It runs on its own after boot; its settings are in /etc/tlp.conf." ;;
+        esac
+        if [ "$CPU_VENDOR" = "GenuineIntel" ]; then
+            say "On Intel CPUs, thermald is installed too: it keeps the CPU from overheating by managing its power limits before the firmware has to throttle it hard."
+        fi
+        ask_yn WANT_POWER "Set up laptop power management?" "$def"
+    fi
+
+    def="n"
+    if [[ $MAC_MODEL = MacBook* ]]; then def="y"; fi
+    def=$(yn_default WANT_MBPFAN "$def")
+    WANT_MBPFAN="no"
+    if [ "$IS_APPLE" = "yes" ] && [ "$VIRT" = "none" ]; then
+        subsection "Mac fan control"
+        say "Linux does not control the fans of Intel Macs by itself, so they stay slow while the CPU heats up. mbpfan reads the temperature sensors and sets the fan speed (made for MacBook, MacBook Air and MacBook Pro models; it works on many other Intel Macs too)." \
+            "Gentoo only has a testing (~amd64) version of app-laptop/mbpfan. The installer would accept that one package's testing version and enable the service."
+        ask_yn WANT_MBPFAN "Install mbpfan for fan control?" "$def"
+    fi
 }
 
 NATIVE_GUI_APPS=(
@@ -572,6 +660,7 @@ NATIVE_GUI_APPS=(
     "media-gfx/gimp|GIMP image editor"
     "media-gfx/inkscape|Inkscape vector graphics editor"
     "media-sound/audacity|Audacity audio editor"
+    "app-admin/keepassxc|KeePassXC password manager"
     "net-p2p/qbittorrent|qBittorrent BitTorrent client"
 )
 NATIVE_CLI_APPS=(
@@ -622,16 +711,16 @@ q_software() {
     say "Packages are downloaded from Gentoo's global mirror network (a CDN), which is fast almost everywhere. You can instead pick specific mirrors with mirrorselect." 
     local -a mopts=("cdn|Gentoo's global CDN (recommended)")
     local mirror_mode def_mirror="cdn"
-    if [[ -n $GENTOO_MIRRORS_VALUE ]]; then
+    if [ -n "$GENTOO_MIRRORS_VALUE" ]; then
         mopts+=("keep|Keep the mirrors chosen before: ${GENTOO_MIRRORS_VALUE}")
         def_mirror="keep"
     fi
     if have mirrorselect; then mopts+=("select|Choose mirrors myself (mirrorselect)"); fi
     choose mirror_mode "Download mirror" "$def_mirror" "${mopts[@]}"
-    if [[ $mirror_mode == "cdn" ]]; then
+    if [ "$mirror_mode" = "cdn" ]; then
         GENTOO_MIRRORS_VALUE=""
         DIST_BASE="https://distfiles.gentoo.org"
-    elif [[ $mirror_mode == "select" ]]; then
+    elif [ "$mirror_mode" = "select" ]; then
         GENTOO_MIRRORS_VALUE=""
         DIST_BASE="https://distfiles.gentoo.org"
         say "mirrorselect will show a list. Use the arrow keys and space bar to mark mirrors near you, then confirm with Enter."
@@ -641,7 +730,7 @@ q_software() {
         out=$(mirrorselect -i -o 2>/dev/tty || true)
         GENTOO_MIRRORS_VALUE=$(sed -n 's/^GENTOO_MIRRORS="\(.*\)"$/\1/p' <<<"$out" | head -n1 || true)
         GENTOO_MIRRORS_VALUE=$(trim "$GENTOO_MIRRORS_VALUE")
-        if [[ -n $GENTOO_MIRRORS_VALUE ]]; then
+        if [ -n "$GENTOO_MIRRORS_VALUE" ]; then
             DIST_BASE="${GENTOO_MIRRORS_VALUE%% *}"
             DIST_BASE="${DIST_BASE%/}"
             ok "Using mirrors: ${GENTOO_MIRRORS_VALUE}"
@@ -653,20 +742,20 @@ q_software() {
     local def_flatpak
     def_flatpak=$(yn_default WANT_FLATPAK y)
     WANT_FLATPAK="no"
-    if [[ $DE != "none" ]]; then
+    if [ "$DE" != "none" ]; then
         subsection "Flatpak"
         say "Flatpak installs desktop applications from Flathub in their own sandboxed containers, independent from Portage. They are prebuilt (no compiling), update separately with 'flatpak update', and use more disk space because they bundle their own libraries. Handy for large or proprietary apps such as Steam, Discord or Spotify."
         ask_yn WANT_FLATPAK "Install Flatpak and add the Flathub repository?" "$def_flatpak"
-        if [[ $WANT_FLATPAK == "yes" ]]; then
+        if [ "$WANT_FLATPAK" = "yes" ]; then
             choose_multi FLATPAK_APPS "Flatpak apps to install now (you can add more any time later)" "${FLATPAK_CATALOG[@]}"
         fi
     fi
-    if [[ $WANT_FLATPAK != "yes" ]]; then FLATPAK_APPS=""; fi
+    if [ "$WANT_FLATPAK" != "yes" ]; then FLATPAK_APPS=""; fi
 
     subsection "Native packages"
     say "These are installed with Portage (emerge), the Gentoo way. Everything is optional and you can install anything else later with 'emerge --ask <package>'. Pick nothing here if you chose the same apps as Flatpaks above."
     local -a catalog=()
-    if [[ $DE != "none" ]]; then catalog+=("${NATIVE_GUI_APPS[@]}"); fi
+    if [ "$DE" != "none" ]; then catalog+=("${NATIVE_GUI_APPS[@]}"); fi
     catalog+=("${NATIVE_CLI_APPS[@]}")
     choose_multi EXTRA_PKGS "Native packages to install" "${catalog[@]}"
 }
@@ -695,8 +784,8 @@ compute_derived() {
         gnome) PROFILE_SUFFIX="/desktop/gnome" ;;
         *) PROFILE_SUFFIX="/desktop" ;;
     esac
-    if [[ $INIT == "systemd" ]]; then PROFILE_SUFFIX+="/systemd"; fi
-    if [[ $DE == "none" ]]; then STAGE3_VARIANT="$INIT"; else STAGE3_VARIANT="desktop-${INIT}"; fi
+    if [ "$INIT" = "systemd" ]; then PROFILE_SUFFIX+="/systemd"; fi
+    if [ "$DE" = "none" ]; then STAGE3_VARIANT="$INIT"; else STAGE3_VARIANT="desktop-${INIT}"; fi
 }
 
 ask_all_questions() {
@@ -716,55 +805,62 @@ summary_row() {
 print_summary() {
     section "Summary: please check everything"
     summary_row "Desktop:" "$(de_label "$DE")"
-    if [[ $DE != "none" ]]; then
-        if [[ $DE == "sway" ]]; then
-            summary_row "Login:" "text console$( [[ $SWAY_AUTOSTART == yes ]] && echo ", Sway starts automatically on tty1" )"
+    if [ "$DE" != "none" ]; then
+        if [ "$DE" = "sway" ]; then
+            summary_row "Login:" "text console$( [ "$SWAY_AUTOSTART" = yes ] && printf '%s\n' ", Sway starts automatically on tty1" )"
         else
-            summary_row "Login screen:" "$( [[ $DM == none ]] && echo "none (text console)" || echo "$DM" )"
+            summary_row "Login screen:" "$( [ "$DM" = none ] && printf '%s\n' "none (text console)" || printf '%s\n' "$DM" )"
         fi
     fi
     summary_row "Init system:" "$INIT"
     summary_row "Profile:" "default/linux/amd64/<current>${PROFILE_SUFFIX}"
     summary_row "Stage3:" "stage3-amd64-${STAGE3_VARIANT}"
-    summary_row "Binary packages:" "$USE_BINPKG$( [[ $BINHOST_V3 == yes ]] && echo " (x86-64-v3 preferred)" )"
+    summary_row "Binary packages:" "$USE_BINPKG$( [ "$BINHOST_V3" = yes ] && printf '%s\n' " (x86-64-v3 preferred)" )"
     summary_row "Kernel:" "sys-kernel/${KERNEL_PKG}"
     summary_row "Compiler flags:" "-march=native -O2 -pipe"
     summary_row "MAKEOPTS:" "-j${MAKE_JOBS} -l${NPROC}   (emerge --jobs=${EMERGE_JOBS})"
-    summary_row "CPU_FLAGS_X86:" "$( [[ $TUNE_CPU_FLAGS == yes ]] && echo "detected with cpuid2cpuflags" || echo "profile default" )"
+    summary_row "CPU_FLAGS_X86:" "$( [ "$TUNE_CPU_FLAGS" = yes ] && printf '%s\n' "detected with cpuid2cpuflags" || printf '%s\n' "profile default" )"
     summary_row "VIDEO_CARDS:" "${VIDEO_CARDS:-(none)}"
-    echo
-    summary_row "Boot mode / bootloader:" "${BOOT_MODE^^} / ${BOOTLOADER}$( [[ $LIVE_BOOT_MODE == bios && $BOOT_MODE == uefi ]] && echo "   (live system in BIOS mode: bootloader at the EFI fallback path)" )"
-    if [[ $PART_MODE == "auto" ]]; then
+    printf '\n'
+    summary_row "Boot mode / bootloader:" "${BOOT_MODE^^}$( [ "$UEFI_BITS" = 32 ] && printf ' (32-bit)' ) / ${BOOTLOADER}$( [ "$LIVE_BOOT_MODE" = bios ] && [ "$BOOT_MODE" = uefi ] && printf '%s' "   (live system in BIOS mode: bootloader at the EFI fallback path)" )"
+    summary_row "Partition table:" "${PTABLE^^}"
+    if [ "$PART_MODE" = "auto" ]; then
         summary_row "Disk:" "${DISK}  ${C_RED}(EVERYTHING ON IT WILL BE ERASED)${C_RESET}"
     else
         summary_row "Disk mode:" "manual partitions"
-        if [[ $BOOT_MODE == "uefi" ]]; then
-            summary_row "EFI partition:" "${ESP_PART} -> /efi $( [[ $FORMAT_ESP == yes ]] && echo "(WILL BE FORMATTED)" || echo "(kept, not formatted)" )"
+        if [ "$BOOT_MODE" = "uefi" ]; then
+            summary_row "EFI partition:" "${ESP_PART} -> /efi $( [ "$FORMAT_ESP" = yes ] && printf '%s\n' "(WILL BE FORMATTED)" || printf '%s\n' "(kept, not formatted)" )"
         fi
-        if [[ -n $BOOT_PART ]]; then summary_row "/boot partition:" "${BOOT_PART} (WILL BE FORMATTED)"; fi
+        if [ -n "$BOOT_PART" ]; then summary_row "/boot partition:" "${BOOT_PART} (WILL BE FORMATTED)"; fi
         summary_row "Root partition:" "${ROOT_PART} (WILL BE FORMATTED)"
-        if [[ -n $SWAP_PART ]]; then summary_row "Swap partition:" "${SWAP_PART} (WILL BE FORMATTED)"; fi
-        if [[ $BOOT_MODE == "bios" ]]; then summary_row "GRUB installed to:" "$GRUB_DISK"; fi
+        if [ -n "$SWAP_PART" ]; then summary_row "Swap partition:" "${SWAP_PART} (WILL BE FORMATTED)"; fi
+        if [ "$BOOT_MODE" = "bios" ]; then summary_row "GRUB installed to:" "$GRUB_DISK"; fi
     fi
-    summary_row "Root filesystem:" "${FS}$( [[ $FS == btrfs ]] && echo " (subvolumes @, @home; zstd compression)" )"
-    summary_row "Encryption:" "$( [[ $ENCRYPT == yes ]] && echo "LUKS2" || echo "no" )"
-    summary_row "Swap:" "$SWAP_MODE$( [[ -n $SWAP_SIZE_GIB ]] && echo " (${SWAP_SIZE_GIB} GiB)" )"
-    echo
+    summary_row "Root filesystem:" "${FS}$( [ "$FS" = btrfs ] && printf '%s\n' " (subvolumes @, @home; zstd compression)" )"
+    summary_row "Encryption:" "$( [ "$ENCRYPT" = yes ] && printf '%s\n' "LUKS2" || printf '%s\n' "no" )"
+    summary_row "Swap:" "$SWAP_MODE$( [ -n "$SWAP_SIZE_GIB" ] && printf '%s\n' " (${SWAP_SIZE_GIB} GiB)" )"
+    printf '\n'
     summary_row "Hostname:" "$NEW_HOSTNAME"
     summary_row "Timezone:" "$TIMEZONE"
     summary_row "Locale:" "$LOCALE"
     summary_row "Console keymap:" "$KEYMAP"
-    if [[ $DE != "none" ]]; then summary_row "Desktop keyboard:" "${XKB_LAYOUT}${XKB_VARIANT:+ (${XKB_VARIANT})}"; fi
+    if [ "$DE" != "none" ]; then summary_row "Desktop keyboard:" "${XKB_LAYOUT}${XKB_VARIANT:+ (${XKB_VARIANT})}"; fi
     summary_row "User:" "$USERNAME (admin tool: ${PRIV_TOOL}, shell: ${USER_SHELL:-bash})"
-    echo
+    printf '\n'
     summary_row "Network:" "$NET_TOOL"
-    summary_row "Graphics driver:" "$( [[ $HAS_NVIDIA == yes ]] && echo "${GPU_DRIVER}$( [[ $GPU_DRIVER == nvidia && $NVIDIA_GEN == legacy580 ]] && echo " (580 branch)" )" || echo "Mesa (open source)" )"
+    summary_row "Graphics driver:" "$( [ "$HAS_NVIDIA" = yes ] && printf '%s\n' "${GPU_DRIVER}$( [ "$GPU_DRIVER" = nvidia ] && [ "$NVIDIA_GEN" = legacy580 ] && printf '%s\n' " (580 branch)" )" || printf '%s\n' "Mesa (open source)" )"
     summary_row "Bluetooth / printing / SSH:" "${WANT_BT} / ${WANT_CUPS} / ${WANT_SSH}"
-    if [[ $VIRT != "none" ]]; then summary_row "VM guest tools:" "$VIRT"; fi
+    if [ "$VIRT" != "none" ]; then summary_row "VM guest tools:" "$VIRT"; fi
+    if [ "$BCM_WIFI" = "wl" ] && [ "$VIRT" = "none" ]; then summary_row "Broadcom wl driver:" "$WANT_BCM_WL"; fi
+    if [ "$BCM_WIFI" = "b43" ] && [ "$VIRT" = "none" ]; then summary_row "Broadcom firmware:" "b43-firmware"; fi
+    if [ "$IS_LAPTOP" = "yes" ]; then
+        summary_row "Power management:" "${WANT_POWER}$( [ "$WANT_POWER" = yes ] && printf ' (%s%s)' "$( [ "$POWER_TOOL" = ppd ] && printf 'power-profiles-daemon' || printf 'TLP' )" "$( [ "$CPU_VENDOR" = GenuineIntel ] && printf ' + thermald' )" )"
+    fi
+    if [ "$IS_APPLE" = "yes" ] && [ "$VIRT" = "none" ]; then summary_row "Mac fan control:" "$WANT_MBPFAN"; fi
     summary_row "Mirror:" "${GENTOO_MIRRORS_VALUE:-global CDN (distfiles.gentoo.org)}"
     summary_row "Flatpak:" "${WANT_FLATPAK}${FLATPAK_APPS:+ (apps: ${FLATPAK_APPS})}"
     summary_row "Native packages:" "${EXTRA_PKGS:-none}"
-    echo
+    printf '\n'
 }
 
 confirm_install() {
@@ -777,15 +873,15 @@ confirm_install() {
         quit) info "Nothing was changed. Bye."; exit 0 ;;
         redo) return 1 ;;
     esac
-    echo
-    if [[ $PART_MODE == "auto" ]]; then
+    printf '\n'
+    if [ "$PART_MODE" = "auto" ]; then
         warn "LAST WARNING: every partition and file on ${DISK} will be permanently deleted."
         read_line typed "  Type ERASE in capital letters to continue (anything else goes back): "
-        if [[ $(trim "$typed") != "ERASE" ]]; then warn "Not confirmed."; return 1; fi
+        if [ "$(trim "$typed")" != "ERASE" ]; then warn "Not confirmed."; return 1; fi
     else
         warn "LAST WARNING: the partitions marked 'WILL BE FORMATTED' above will be erased."
         read_line typed "  Type FORMAT in capital letters to continue (anything else goes back): "
-        if [[ $(trim "$typed") != "FORMAT" ]]; then warn "Not confirmed."; return 1; fi
+        if [ "$(trim "$typed")" != "FORMAT" ]; then warn "Not confirmed."; return 1; fi
     fi
     return 0
 }

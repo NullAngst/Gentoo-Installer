@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  gentoo-install.sh / gentoo-install-tui.sh - guided Gentoo Linux installer for amd64
+#  gentoo_install.sh / gentoo_install_tui.sh: guided Gentoo Linux installer for amd64
 # =============================================================================
 #
 #  What it does
@@ -19,27 +19,30 @@
 #  How to run (from the official Gentoo live image, as root)
 #  ---------------------------------------------------------
 #    Menu version:
-#      curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install-tui.sh
-#      bash gentoo-install-tui.sh
+#      curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo_install_tui.sh
+#      bash gentoo_install_tui.sh
 #    Console version:
-#      curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh
-#      bash gentoo-install.sh
+#      curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo_install.sh
+#      bash gentoo_install.sh
 #
 #  Do not pipe it into bash (curl ... | bash). The script is interactive and
 #  reads your answers from the keyboard.
 #
 #  Options
-#    --resume   Continue an installation that stopped because of an error
-#    --help     Show help
+#    -r, --resume   Continue an installation that stopped because of an error
+#    -h, --help     Show help
 #
 #  Logs
 #    /tmp/gentoo-install.log        (live system)
 #    /var/log/gentoo-install.log    (inside the new system)
+#
+#  Needs bash 4.4 or newer. Built from src/ by build.sh: edit those files,
+#  not the generated installers.
 # =============================================================================
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.4.0"
 readonly MNT="/mnt/gentoo"
 readonly LIVE_LOG="/tmp/gentoo-install.log"
 readonly LIVE_CONF_COPY="/tmp/gentoo-install.conf"
@@ -47,7 +50,7 @@ readonly TARGET_LOG="/var/log/gentoo-install.log"
 readonly CONF_PATH="/root/gentoo-install.conf"
 readonly PROGRESS_PATH="/root/.gentoo-install-progress"
 readonly FAILED_PATH="/root/.gentoo-install-failed-optional"
-readonly SCRIPT_PATH="/root/gentoo-install.sh"
+readonly SCRIPT_PATH="/root/gentoo_install.sh"
 readonly NOTES_NAME="GENTOO-POST-INSTALL-NOTES.txt"
 readonly LUKS_NAME="cryptroot"
 readonly BTRFS_OPTS="noatime,compress=zstd:1"
@@ -67,19 +70,21 @@ LOG="$LIVE_LOG"
 IN_CHROOT="no"
 CURRENT_STEP=""
 SELF=""
+WORK_DIR=""
 
 # Every answer and detected value that the second (chroot) stage needs.
 CONFIG_VARS=(
     DE DM INIT SWAY_AUTOSTART USE_BINPKG BINHOST_V3 TUNE_CPU_FLAGS KERNEL_PKG
-    BOOT_MODE BOOTLOADER PART_MODE DISK ESP_PART FORMAT_ESP BIOS_PART BOOT_PART
+    BOOT_MODE UEFI_BITS BOOTLOADER PART_MODE PTABLE DISK ESP_PART FORMAT_ESP BIOS_PART BOOT_PART
     ROOT_PART SWAP_PART GRUB_DISK DUAL_BOOT NEED_BOOT_PART IS_SSD
     FS ENCRYPT SWAP_MODE SWAP_SIZE_GIB
     NEW_HOSTNAME TIMEZONE LOCALE KEYMAP XKB_LAYOUT XKB_VARIANT
     USERNAME PRIV_TOOL ROOT_HASH USER_HASH
     NET_TOOL WANT_BT WANT_CUPS WANT_SSH WANT_FLATPAK FLATPAK_APPS EXTRA_PKGS
     CPU_VENDOR CPU_MODEL NPROC RAM_GIB IS_LAPTOP HAS_WIFI HAS_BT VIRT SECURE_BOOT
-    HAS_NVIDIA HAS_AMD HAS_INTEL GPU_VM GPU_DRIVER VIDEO_CARDS NVIDIA_GEN
+    HAS_NVIDIA HAS_AMD HAS_INTEL GPU_VM GPU_DRIVER VIDEO_CARDS NVIDIA_GEN HYBRID_GPU
     IS_APPLE MAC_MODEL LIVE_BOOT_MODE USER_SHELL
+    BCM_WIFI WANT_BCM_WL WANT_POWER POWER_TOOL WANT_MBPFAN
     PROFILE_SUFFIX STAGE3_VARIANT MAKE_JOBS EMERGE_JOBS
     KERNEL_CMDLINE GRUB_EXTRA_CMDLINE DIST_BASE GENTOO_MIRRORS_VALUE
 )
@@ -94,11 +99,69 @@ init_defaults() {
     XKB_LAYOUT="us"
     GPU_DRIVER="mesa"
     USER_SHELL="bash"
+    PTABLE="gpt"
     ROOT_PASSWORD=""
     USER_PASSWORD=""
     LUKS_PASSWORD=""
     STAGE3_URL=""
     STAGE3_FILE=""
+}
+
+# ----------------------------------------------------------------------------
+# Temporary files: everything goes into one private directory that is removed
+# when the script exits.
+# ----------------------------------------------------------------------------
+make_work_dir() {
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then return 0; fi
+    WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gentoo_install.XXXXXX")
+    chmod 700 -- "$WORK_DIR"
+}
+
+remove_work_dir() {
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then rm -rf -- "$WORK_DIR"; fi
+    WORK_DIR=""
+}
+
+# work_file NAME: a new private temporary file (prints its path).
+work_file() {
+    make_work_dir
+    mktemp "${WORK_DIR}/${1:-tmp}.XXXXXX"
+}
+
+# self_path: the absolute path of this script, without GNU readlink -f.
+self_path() {
+    local dir base
+    dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    base=$(basename -- "${BASH_SOURCE[0]}")
+    printf '%s/%s\n' "$dir" "$base"
+}
+
+# sed_inplace SCRIPT FILE: edit FILE with sed, portably (no GNU sed -i).
+sed_inplace() {
+    local script=$1 file=$2 tmp
+    tmp=$(mktemp "${file}.XXXXXX")
+    if sed "$script" "$file" >"$tmp"; then
+        cat -- "$tmp" >"$file"
+        rm -f -- "$tmp"
+    else
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
+# strip_colors: remove terminal colour codes from standard input
+# (portable: no \x escapes in the sed script).
+strip_colors() {
+    local esc
+    esc=$(printf '\033')
+    sed "s/${esc}\[[0-9;]*m//g"
+}
+
+# clear_dir DIR: delete everything inside DIR, keeping DIR itself.
+clear_dir() {
+    if [ -d "$1" ]; then
+        find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    fi
 }
 
 # Login shells offered for the user account. These are the interactive login
@@ -121,7 +184,7 @@ SHELL_CATALOG=(
 shell_field() {
     local entry
     for entry in "${SHELL_CATALOG[@]}"; do
-        if [[ ${entry%%|*} == "$1" ]]; then
+        if [ "${entry%%|*}" = "$1" ]; then
             cut -d'|' -f"$2" <<<"$entry"
             return 0
         fi
@@ -134,7 +197,7 @@ valid_shell_choice() { shell_field "$1" 1 >/dev/null; }
 # ----------------------------------------------------------------------------
 # Output helpers
 # ----------------------------------------------------------------------------
-if [[ -t 1 ]]; then
+if [ -t 1 ]; then
     C_RESET=$'\e[0m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
     C_RED=$'\e[1;31m'; C_GREEN=$'\e[1;32m'; C_YELLOW=$'\e[1;33m'
     C_BLUE=$'\e[1;34m'; C_CYAN=$'\e[1;36m'
@@ -149,11 +212,11 @@ log() {
 
 term_width() {
     local w
-    w=$(tput cols 2>/dev/null || echo 80)
+    w=$(tput cols 2>/dev/null || printf '%s\n' 80)
     [[ $w =~ ^[0-9]+$ ]] || w=80
     if (( w > 100 )); then w=100; fi
     if (( w < 50 )); then w=50; fi
-    echo "$w"
+    printf '%s\n' "$w"
 }
 
 hr() {
@@ -163,54 +226,55 @@ hr() {
     printf '%s%s%s\n' "$C_BLUE" "${line// /=}" "$C_RESET"
 }
 
-section() {
-    echo
+cli_section() {
+    printf '\n'
     hr
     printf '%s  %s%s\n' "$C_BOLD" "$*" "$C_RESET"
     hr
     log "===== $* ====="
 }
 
-subsection() {
-    echo
+cli_subsection() {
+    printf '\n'
     printf '%s--- %s ---%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"
     log "--- $* ---"
 }
 
 # say "paragraph" ["paragraph" ...]: print wrapped, indented paragraphs.
-say() {
+cli_say() {
     local w p
     w=$(( $(term_width) - 4 ))
     for p in "$@"; do
         printf '%s\n' "$p" | fold -s -w "$w" | sed 's/^/  /'
-        echo
+        printf '\n'
     done
 }
 
 # say_pre "text": show preformatted text (tables, lists) without re-wrapping.
-say_pre() {
+cli_say_pre() {
     printf '%s\n\n' "$1"
 }
 
-# Front-end hooks. The console front end needs none of them; the TUI overrides them.
-handoff_screen() { :; }     # called before a full-screen program (cfdisk, nmtui, a shell) takes over
-ui_install_phase() { :; }   # called when the unattended installation starts
-ui_finish_phase() { :; }    # called before the final questions
+# Front-end hooks: handoff_screen runs before a full-screen program (cfdisk,
+# nmtui, a shell) takes over, ui_install_phase when the unattended
+# installation starts, ui_finish_phase before the final questions. The console
+# front end needs none of them (src/90_main_cli.sh); the TUI defines them.
+cli_handoff_screen() { :; }
 
 # yn_default VAR FALLBACK: the y/n default for a question whose previous answer is in VAR.
 yn_default() {
     case "${!1:-}" in
-        yes) echo "y" ;;
-        no) echo "n" ;;
-        *) echo "$2" ;;
+        yes) printf '%s\n' "y" ;;
+        no) printf '%s\n' "n" ;;
+        *) printf '%s\n' "$2" ;;
     esac
 }
 
-info() { printf '%s[ INFO ]%s %s\n' "$C_CYAN" "$C_RESET" "$*"; log "INFO: $*"; }
-ok()   { printf '%s[  OK  ]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; log "OK: $*"; }
-warn() { printf '%s[ WARN ]%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; log "WARN: $*"; }
+cli_info() { printf '%s[ INFO ]%s %s\n' "$C_CYAN" "$C_RESET" "$*"; log "INFO: $*"; }
+cli_ok() { printf '%s[  OK  ]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; log "OK: $*"; }
+cli_warn() { printf '%s[ WARN ]%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; log "WARN: $*"; }
 err()  { printf '%s[ FAIL ]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; log "FAIL: $*"; }
-die()  { err "$*"; exit 1; }
+cli_die() { err "$*"; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -218,7 +282,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # RUN_CMD remembers the command, because when it fails the error trap only sees
 # the last part of the pipeline (tee).
 RUN_CMD=""
-run() {
+cli_run() {
     printf '%s    $ %s%s\n' "$C_DIM" "$*" "$C_RESET"
     log "RUN: $*"
     RUN_CMD="$*"
@@ -232,42 +296,42 @@ show_build_log_excerpt() {
     blog=$(grep -o "The complete build log is located at '[^']*'" "$LOG" 2>/dev/null | tail -n1 || true)
     blog=${blog#*located at \'}
     blog=${blog%\'}
-    if [[ -z $blog || ! -r $blog ]]; then return 0; fi
+    if [ -z "$blog" ] || [ ! -r "$blog" ]; then return 0; fi
     local pattern="\\*\\*\\* \\[|error:|Error [0-9]+|Can't locate|No such file or directory|Illegal instruction|Segmentation fault|Killed|undefined reference|command not found|can't get .--help' info"
     errors=$(grep -nE "$pattern" "$blog" 2>/dev/null \
         | grep -vE "^[0-9]+:(checking|configure:)|-Werror|-Wno-error" || true)
     local first=${errors%%:*} from
     {
-        echo
-        echo "---- Why it failed: lines from the package's build log ----"
-        echo "Build log: ${blog}"
-        echo "(from the live system: ${MNT}${blog})"
+        printf '\n'
+        printf '%s\n' "---- Why it failed: lines from the package's build log ----"
+        printf '%s\n' "Build log: ${blog}"
+        printf '%s\n' "(from the live system: ${MNT}${blog})"
         if [[ $first =~ ^[0-9]+$ ]]; then
             from=$(( first > 12 ? first - 12 : 1 ))
-            echo
-            echo "Where it first went wrong (lines ${from}-$(( first + 3 )); the cause is usually just above the first '***' or 'error' line):"
+            printf '\n'
+            printf '%s\n' "Where it first went wrong (lines ${from}-$(( first + 3 )); the cause is usually just above the first '***' or 'error' line):"
             sed -n "${from},$(( first + 3 ))p" "$blog"
         fi
-        echo
-        echo "Last lines of the build log:"
+        printf '\n'
+        printf '%s\n' "Last lines of the build log:"
         tail -n 25 "$blog"
-        echo
+        printf '\n'
         if grep -q "Can't locate .*\.pm in @INC" "$blog" 2>/dev/null; then
-            echo "A Perl module could not be loaded. This usually happens after Perl was"
-            echo "upgraded and its modules were not rebuilt. Fix it from the live system with:"
-            echo "  chroot ${MNT} /bin/bash -c 'source /etc/profile && perl-cleaner --all -- --quiet-build=y'"
-            echo "then resume the installer."
-            echo
+            printf '%s\n' "A Perl module could not be loaded. This usually happens after Perl was"
+            printf '%s\n' "upgraded and its modules were not rebuilt. Fix it from the live system with:"
+            printf '%s\n' "  chroot ${MNT} /bin/bash -c 'source /etc/profile && perl-cleaner --all -- --quiet-build=y'"
+            printf '%s\n' "then resume the installer."
+            printf '\n'
         fi
-        if [[ -z $errors && -n $(tail -c 1 "$blog") ]]; then
-            echo "The build log stops in the middle of a line without any error message:"
-            echo "the build lost its output channel before it could report anything."
-            echo "Possible causes: Portage could not write the build output to the screen,"
-            echo "the disk is full, or the filesystem became read-only (free space below)."
+        if [ -z "$errors" ] && [ -n "$(tail -c 1 "$blog")" ]; then
+            printf '%s\n' "The build log stops in the middle of a line without any error message:"
+            printf '%s\n' "the build lost its output channel before it could report anything."
+            printf '%s\n' "Possible causes: Portage could not write the build output to the screen,"
+            printf '%s\n' "the disk is full, or the filesystem became read-only (free space below)."
         fi
-        echo "Free space on the new system's root filesystem:"
+        printf '%s\n' "Free space on the new system's root filesystem:"
         df -h / 2>/dev/null | sed 's/^/    /' || true
-        echo "------------------------------------------------------------"
+        printf '%s\n' "------------------------------------------------------------"
     } | tee -a "$LOG"
 }
 
@@ -301,23 +365,23 @@ disk_free_kib() {
 free_package_caches() {
     local dir loc conf
     local -a dirs=()
-    dirs+=("$(portageq envvar PKGDIR 2>/dev/null || echo /var/cache/binpkgs)")
+    dirs+=("$(portageq envvar PKGDIR 2>/dev/null || printf '%s\n' /var/cache/binpkgs)")
     dirs+=("/var/cache/binhost")
     # binrepos.conf may be a file or a directory of files; read regular files only.
     for conf in /etc/portage/binrepos.conf /etc/portage/binrepos.conf/*.conf; do
-        [[ -f $conf ]] || continue
+        [ -f "$conf" ] || continue
         while IFS= read -r loc; do
-            if [[ -n $loc ]]; then dirs+=("$loc"); fi
+            if [ -n "$loc" ]; then dirs+=("$loc"); fi
         done < <(sed -n 's/^[[:space:]]*location[[:space:]]*=[[:space:]]*//p' "$conf")
     done
-    if [[ ${1:-} == "--all" ]]; then
-        dirs+=("$(portageq envvar DISTDIR 2>/dev/null || echo /var/cache/distfiles)")
-        dirs+=("$(portageq envvar PORTAGE_TMPDIR 2>/dev/null || echo /var/tmp)/portage")
+    if [ "${1:-}" = "--all" ]; then
+        dirs+=("$(portageq envvar DISTDIR 2>/dev/null || printf '%s\n' /var/cache/distfiles)")
+        dirs+=("$(portageq envvar PORTAGE_TMPDIR 2>/dev/null || printf '%s\n' /var/tmp)/portage")
     fi
     for dir in "${dirs[@]}"; do
         dir=$(trim "$dir")
-        if [[ -n $dir && $dir != "/" && -d $dir ]]; then
-            find "$dir" -mindepth 1 -delete 2>/dev/null || true
+        if [ -n "$dir" ] && [ "$dir" != "/" ] && [ -d "$dir" ]; then
+            clear_dir "$dir"
             log "Cleared ${dir}"
         fi
     done
@@ -334,10 +398,10 @@ trim() {
 # Error handling
 # ----------------------------------------------------------------------------
 print_resume_help() {
-    if [[ -f "${MNT}${CONF_PATH}" ]]; then
-        echo
+    if [ -f "${MNT}${CONF_PATH}" ]; then
+        printf '\n'
         say "Nothing is lost. Every finished step is recorded, so the installer can continue where it stopped." \
-            "What to do: 1) Read the end of the log to see what went wrong. 2) Fix the cause (common ones: a network hiccup, a package that needs a USE flag change, a full disk). 3) Run:  bash ${SELF:-gentoo-install.sh} --resume" \
+            "What to do: 1) Read the end of the log to see what went wrong. 2) Fix the cause (common ones: a network hiccup, a package that needs a USE flag change, a full disk). 3) Run:  bash ${SELF:-gentoo_install.sh} --resume" \
             "To fix something inside the new system first, run:  chroot ${MNT} /bin/bash  then  source /etc/profile. Type exit when done, then resume."
     fi
 }
@@ -345,17 +409,17 @@ print_resume_help() {
 on_error() {
     local rc=$1 line=$2 cmd=$3
     trap - ERR
-    if [[ ${TUI_ACTIVE:-no} == "yes" ]]; then clear 2>/dev/null || true; TUI_ACTIVE="no"; fi
+    if [ "${TUI_ACTIVE:-no}" = "yes" ]; then clear 2>/dev/null || true; TUI_ACTIVE="no"; fi
     if (( rc == 0 )); then rc=1; fi
     # shellcheck disable=SC2016  # the literal text of run's tee command, as the trap reports it
-    if [[ $cmd == 'tee -a "$LOG"' && -n ${RUN_CMD:-} ]]; then cmd=$RUN_CMD; fi
-    echo
+    if [ "$cmd" = 'tee -a "$LOG"' ] && [ -n "${RUN_CMD:-}" ]; then cmd=$RUN_CMD; fi
+    printf '\n'
     err "A command failed (exit code ${rc}, script line ${line}):"
     err "    ${cmd}"
     err "Full log: ${LOG}"
-    if [[ $IN_CHROOT == "yes" ]]; then
+    if [ "$IN_CHROOT" = "yes" ]; then
         err "This happened inside the new system during step ${CURRENT_STEP:-unknown}."
-        if [[ $cmd == emerge* ]]; then show_build_log_excerpt; fi
+        if [[ $cmd = emerge* ]]; then show_build_log_excerpt; fi
     else
         print_resume_help
     fi
@@ -364,10 +428,10 @@ on_error() {
 
 on_interrupt() {
     trap - ERR INT
-    if [[ ${TUI_ACTIVE:-no} == "yes" ]]; then clear 2>/dev/null || true; TUI_ACTIVE="no"; fi
-    echo
+    if [ "${TUI_ACTIVE:-no}" = "yes" ]; then clear 2>/dev/null || true; TUI_ACTIVE="no"; fi
+    printf '\n'
     err "Interrupted by user (Ctrl+C)."
-    if [[ $IN_CHROOT != "yes" ]]; then
+    if [ "$IN_CHROOT" != "yes" ]; then
         print_resume_help
     fi
     exit 130
@@ -378,7 +442,7 @@ safe_source() {
     trap - ERR
     set +eu
     # shellcheck disable=SC1090
-    source "$1"
+    . "$1"
     set -eu
     trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
 }
@@ -391,22 +455,22 @@ safe_source() {
 read_line() {
     local __rl_var=$1 __rl_prompt=$2 __rl_val
     if ! IFS= read -r -p "$__rl_prompt" __rl_val; then
-        echo
+        printf '\n'
         die "Input ended unexpectedly. Run the script from an interactive terminal."
     fi
     printf -v "$__rl_var" '%s' "$__rl_val"
 }
 
-pause() {
+cli_pause() {
     local __p
     read_line __p "  Press Enter to continue... "
 }
 
 # ask VAR "Question" "default" [validator_function]
-ask() {
+cli_ask() {
     local __var=$1 __q=$2 __def=${3:-} __check=${4:-} __a
     while true; do
-        if [[ -n $__def ]]; then
+        if [ -n "$__def" ]; then
             read_line __a "  ${__q} [${__def}]: "
             __a=$(trim "$__a")
             __a=${__a:-$__def}
@@ -414,24 +478,24 @@ ask() {
             read_line __a "  ${__q}: "
             __a=$(trim "$__a")
         fi
-        if [[ -z $__a ]]; then
+        if [ -z "$__a" ]; then
             warn "An answer is required."
             continue
         fi
-        if [[ -n $__check ]] && ! "$__check" "$__a"; then
+        if [ -n "$__check" ] && ! "$__check" "$__a"; then
             continue
         fi
         printf -v "$__var" '%s' "$__a"
         log "ANSWER: ${__q} => ${__a}"
-        echo
+        printf '\n'
         return 0
     done
 }
 
 # ask_yn VAR "Question" y|n   (VAR becomes "yes" or "no")
-ask_yn() {
+cli_ask_yn() {
     local __var=$1 __q=$2 __def=$3 __a __hint="y/N"
-    if [[ $__def == "y" ]]; then __hint="Y/n"; fi
+    if [ "$__def" = "y" ]; then __hint="Y/n"; fi
     while true; do
         read_line __a "  ${__q} [${__hint}]: "
         __a=$(trim "$__a")
@@ -443,18 +507,18 @@ ask_yn() {
         esac
     done
     log "ANSWER: ${__q} => ${!__var}"
-    echo
+    printf '\n'
 }
 
 # yesno "Question" y|n   (returns 0 for yes)
 yesno() {
     local __yn
     ask_yn __yn "$1" "$2"
-    [[ $__yn == "yes" ]]
+    [ "$__yn" = "yes" ]
 }
 
 # choose VAR "Question" DEFAULT_VALUE "value|Label" ...
-choose() {
+cli_choose() {
     local __var=$1 __q=$2 __def=$3
     shift 3
     local -a __vals=() __labs=()
@@ -464,7 +528,7 @@ choose() {
         __labs+=("${__o#*|}")
     done
     for __i in "${!__vals[@]}"; do
-        if [[ ${__vals[__i]} == "$__def" ]]; then __defi=$(( __i + 1 )); fi
+        if [ "${__vals[__i]}" = "$__def" ]; then __defi=$(( __i + 1 )); fi
     done
     printf '\n  %s%s%s\n' "$C_BOLD" "$__q" "$C_RESET"
     for __i in "${!__vals[@]}"; do
@@ -481,7 +545,7 @@ choose() {
         if [[ $__a =~ ^[0-9]+$ ]] && (( __a >= 1 && __a <= ${#__vals[@]} )); then
             printf -v "$__var" '%s' "${__vals[__a - 1]}"
             log "ANSWER: ${__q} => ${__vals[__a - 1]}"
-            echo
+            printf '\n'
             return 0
         fi
         warn "Please enter a number between 1 and ${#__vals[@]}."
@@ -489,7 +553,7 @@ choose() {
 }
 
 # choose_multi VAR "Question" "value|Label" ...   (VAR = space separated values)
-choose_multi() {
+cli_choose_multi() {
     local __var=$1 __q=$2
     shift 2
     local -a __vals=() __labs=() __picked=() __toks=()
@@ -506,8 +570,8 @@ choose_multi() {
         read_line __a "  Numbers separated by spaces (example: 1 4 7), 'all', or Enter for none: "
         __a=$(trim "${__a//,/ }")
         __picked=()
-        if [[ -z $__a || ${__a,,} == "none" ]]; then break; fi
-        if [[ ${__a,,} == "all" ]]; then
+        if [ -z "$__a" ] || [ "${__a,,}" = "none" ]; then break; fi
+        if [ "${__a,,}" = "all" ]; then
             __picked=("${__vals[@]}")
             break
         fi
@@ -521,7 +585,7 @@ choose_multi() {
                 __bad="yes"
             fi
         done
-        if [[ $__bad == "no" ]]; then break; fi
+        if [ "$__bad" = "no" ]; then break; fi
     done
     for __p in "${__picked[@]}"; do
         if [[ " $__out " != *" $__p "* ]]; then
@@ -530,22 +594,22 @@ choose_multi() {
     done
     printf -v "$__var" '%s' "$__out"
     log "ANSWER: ${__q} => ${__out:-none}"
-    echo
+    printf '\n'
 }
 
 # ask_password VAR "what" MIN_LENGTH
-ask_password() {
+cli_ask_password() {
     local __var=$1 __what=$2 __min=${3:-1} __p1 __p2
     while true; do
-        if ! IFS= read -r -s -p "  Type the ${__what}: " __p1; then echo; die "Input ended unexpectedly."; fi
-        echo
+        if ! IFS= read -r -s -p "  Type the ${__what}: " __p1; then printf '\n'; die "Input ended unexpectedly."; fi
+        printf '\n'
         if (( ${#__p1} < __min )); then
             if (( __min == 1 )); then warn "It cannot be empty."; else warn "It must be at least ${__min} characters long."; fi
             continue
         fi
-        if ! IFS= read -r -s -p "  Type it again to confirm: " __p2; then echo; die "Input ended unexpectedly."; fi
-        echo
-        if [[ $__p1 != "$__p2" ]]; then
+        if ! IFS= read -r -s -p "  Type it again to confirm: " __p2; then printf '\n'; die "Input ended unexpectedly."; fi
+        printf '\n'
+        if [ "$__p1" != "$__p2" ]; then
             warn "The two entries did not match. Try again."
             continue
         fi
@@ -558,6 +622,10 @@ ask_password() {
         return 0
     done
 }
+
+# The rest of the installer calls say, choose, ask, ... without the cli_
+# prefix. Those names are defined by each front end: src/90_main_cli.sh maps
+# them to the console versions above, src/60_tui.sh to dialog boxes.
 
 # ----------------------------------------------------------------------------
 # Validators (print a warning and return 1 when the value is not acceptable)
@@ -597,8 +665,8 @@ valid_keymap() {
         warn "That does not look like a keymap name."
         return 1
     fi
-    if [[ -n $(find /usr/share/keymaps -name 'us.map*' -print -quit 2>/dev/null || true) ]]; then
-        if [[ -n $(find /usr/share/keymaps -name "${k}.map*" -print -quit 2>/dev/null || true) ]]; then
+    if [ -n "$(find /usr/share/keymaps -name 'us.map*' -print 2>/dev/null | head -n1 || true)" ]; then
+        if [ -n "$(find /usr/share/keymaps -name "${k}.map*" -print 2>/dev/null | head -n1 || true)" ]; then
             return 0
         fi
         warn "Keymap '${k}' was not found. Examples: us, uk, de, de-latin1, fr, es, it, br-abnt2, pl, ru, dvorak."
@@ -612,7 +680,7 @@ valid_xkb_layout() {
         warn "XKB layout names are short lowercase codes such as us, gb, de, fr, es, ch, latam. Console keymap names like 'de-latin1' do not work here."
         return 1
     fi
-    if [[ -f /usr/share/X11/xkb/symbols/us && ! -f /usr/share/X11/xkb/symbols/$1 ]]; then
+    if [ -f /usr/share/X11/xkb/symbols/us ] && [ ! -f "/usr/share/X11/xkb/symbols/$1" ]; then
         warn "XKB layout '$1' was not found in /usr/share/X11/xkb/symbols."
         return 1
     fi
@@ -625,7 +693,7 @@ valid_locale() {
         warn "Use the form language_COUNTRY.UTF-8, for example en_US.UTF-8, en_GB.UTF-8, de_DE.UTF-8."
         return 1
     fi
-    if [[ -r /usr/share/i18n/SUPPORTED ]] && grep -q '^en_US.UTF-8 ' /usr/share/i18n/SUPPORTED \
+    if [ -r /usr/share/i18n/SUPPORTED ] && grep -q '^en_US.UTF-8 ' /usr/share/i18n/SUPPORTED \
         && ! grep -q "^${l} " /usr/share/i18n/SUPPORTED; then
         warn "Locale '${l}' is not in the list of supported locales (/usr/share/i18n/SUPPORTED)."
         return 1
@@ -704,13 +772,13 @@ BUILTIN_TIMEZONES=(
 
 # True when the live system has a real timezone database (the LiveGUI does).
 tz_live_usable() {
-    [[ -r /usr/share/zoneinfo/zone1970.tab && -f /usr/share/zoneinfo/UTC ]]
+    [ -r /usr/share/zoneinfo/zone1970.tab ] && [ -f /usr/share/zoneinfo/UTC ]
 }
 
 # Print all known timezone names, one per line.
 tz_names() {
     if tz_live_usable; then
-        { echo "UTC"; grep -v '^#' /usr/share/zoneinfo/zone1970.tab | awk -F'\t' 'NF >= 3 {print $3}'; } | sort -u
+        { printf '%s\n' "UTC"; grep -v '^#' /usr/share/zoneinfo/zone1970.tab | awk -F'\t' 'NF >= 3 {print $3}'; } | sort -u
     else
         printf '%s\n' "${BUILTIN_TIMEZONES[@]}"
     fi
@@ -736,33 +804,33 @@ print_columns() {
         }' <<<"$1"
 }
 
-browse_timezones() {
+cli_browse_timezones() {
     local names region cities
     names=$(tz_names)
-    echo
-    echo "  Regions:"
-    print_columns "$(awk -F/ 'NF > 1 {print $1}' <<<"$names" | sort -u; echo "UTC")"
+    printf '\n'
+    printf '%s\n' "  Regions:"
+    print_columns "$(awk -F/ 'NF > 1 {print $1}' <<<"$names" | sort -u; printf '%s\n' "UTC")"
     read_line region "  Region to list (Enter to go back): "
     region=$(trim "$region")
-    if [[ -z $region ]]; then return 0; fi
-    if [[ $region == "UTC" ]]; then
-        echo "  Type UTC to use it."
+    if [ -z "$region" ]; then return 0; fi
+    if [ "$region" = "UTC" ]; then
+        printf '%s\n' "  Type UTC to use it."
         return 0
     fi
     cities=$(awk -v r="${region}/" 'index($0, r) == 1 {print substr($0, length(r) + 1)}' <<<"$names")
-    if [[ -z $cities ]]; then
+    if [ -z "$cities" ]; then
         warn "There is no region called '${region}'. Region names are case sensitive, for example Europe."
         return 0
     fi
-    echo
+    printf '\n'
     print_columns "$cities"
-    echo
-    echo "  Now type the full name, for example ${region}/$(head -n1 <<<"$cities")"
+    printf '\n'
+    printf '%s\n' "  Now type the full name, for example ${region}/$(head -n1 <<<"$cities")"
 }
 
 valid_timezone() {
     local tz=$1
-    if [[ $tz == "list" ]]; then
+    if [ "$tz" = "list" ]; then
         browse_timezones
         return 1
     fi
@@ -771,7 +839,7 @@ valid_timezone() {
         return 1
     fi
     if tz_live_usable; then
-        if [[ -f /usr/share/zoneinfo/$tz ]]; then return 0; fi
+        if [ -f "/usr/share/zoneinfo/$tz" ]; then return 0; fi
         warn "Timezone '${tz}' was not found. Names are case sensitive. Type 'list' to browse."
         return 1
     fi

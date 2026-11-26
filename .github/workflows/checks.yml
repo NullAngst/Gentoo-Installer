@@ -1,0 +1,38 @@
+# Checks for pushes to main and pull requests. There is nothing to build:
+# the installers are bash scripts, generated from src/ by build.sh and
+# committed. Scripts are called with bash, so they do not need the
+# executable bit (files uploaded through GitHub's web page lose it).
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install ShellCheck and sfdisk if missing
+        run: |
+          missing=""
+          command -v shellcheck >/dev/null 2>&1 || missing="$missing shellcheck"
+          command -v sfdisk >/dev/null 2>&1 || missing="$missing fdisk"
+          if [ -n "$missing" ]; then
+            sudo apt-get update
+            # shellcheck disable=SC2086
+            sudo apt-get install -y $missing
+          fi
+          shellcheck --version
+
+      - name: Installers match src/
+        run: bash build.sh -c
+
+      - name: ShellCheck
+        run: bash build.sh -l
+
+      - name: Tests
+        run: bash tests/run_tests.sh
