@@ -30,25 +30,25 @@ emerge_pkgs() {
 set_user_shell() {
     local want=${USER_SHELL:-bash} cmd path home="/home/${USERNAME}"
     local -a pkgs=()
-    if [[ $want == "bash" ]] || ! valid_shell_choice "$want"; then return 0; fi
+    if [ "$want" = "bash" ] || ! valid_shell_choice "$want"; then return 0; fi
     read -ra pkgs <<<"$(shell_field "$want" 2)"
     cmd=$(shell_field "$want" 3)
     info "Installing the ${want} shell for ${USERNAME}."
     emerge_optional "the ${want} shell" "${pkgs[@]}"
     path=$(command -v "$cmd" 2>/dev/null || true)
-    if [[ -z $path || ! -x $path ]]; then
+    if [ -z "$path" ] || [ ! -x "$path" ]; then
         warn "The ${want} shell is not available, so ${USERNAME} keeps bash. Change it later with: chsh -s <path to the shell>"
         return 0
     fi
     # Login screens and chsh only accept shells listed in /etc/shells.
     if ! grep -qxF "$path" /etc/shells 2>/dev/null; then
-        echo "$path" >>/etc/shells
+        printf '%s\n' "$path" >>/etc/shells
     fi
     run usermod -s "$path" "$USERNAME"
     ok "Login shell for ${USERNAME}: ${path}"
-    if [[ $want == "zsh" && ! -e $home/.zshrc ]]; then
+    if [ "$want" = "zsh" ] && [ ! -e "$home/.zshrc" ]; then
         # Without a ~/.zshrc, zsh starts an interactive setup wizard on first use.
-        printf '%s\n' "# Starter configuration written by gentoo-install.sh. Edit freely." \
+        printf '%s\n' "# Starter configuration written by gentoo_install.sh. Edit freely." \
             "HISTFILE=~/.zsh_history" "HISTSIZE=10000" "SAVEHIST=10000" \
             "setopt appendhistory sharehistory histignoredups" \
             "bindkey -e" \
@@ -56,7 +56,7 @@ set_user_shell() {
             "zstyle ':completion:*' menu select" \
             "autoload -Uz promptinit && promptinit" \
             "prompt gentoo" >"$home/.zshrc"
-        chown "${USERNAME}:${USERNAME}" "$home/.zshrc"
+        chown -- "${USERNAME}:${USERNAME}" "$home/.zshrc"
         ok "Wrote a starter ~/.zshrc for ${USERNAME}."
     fi
 }
@@ -68,12 +68,12 @@ login_file_for_user() {
     local sh
     sh=$(getent passwd "$USERNAME" | cut -d: -f7)
     case "${sh##*/}" in
-        bash) echo "sh .bash_profile" ;;
-        zsh) echo "sh .zprofile" ;;
-        yash) echo "sh .yash_profile" ;;
-        dash|ksh|mksh|sh) echo "sh .profile" ;;
-        fish) echo "fish .config/fish/conf.d/sway-autostart.fish" ;;
-        tcsh|csh) echo "csh .login" ;;
+        bash) printf '%s\n' "sh .bash_profile" ;;
+        zsh) printf '%s\n' "sh .zprofile" ;;
+        yash) printf '%s\n' "sh .yash_profile" ;;
+        dash|ksh|mksh|sh) printf '%s\n' "sh .profile" ;;
+        fish) printf '%s\n' "fish .config/fish/conf.d/sway-autostart.fish" ;;
+        tcsh|csh) printf '%s\n' "csh .login" ;;
         *) ;;
     esac
 }
@@ -82,31 +82,31 @@ login_file_for_user() {
 write_sway_autostart() {
     local home=$1 flag=$2 syntax="" file="" target
     read -r syntax file <<<"$(login_file_for_user)"
-    if [[ -z $file ]]; then
+    if [ -z "$file" ]; then
         warn "Sway is not started automatically for this login shell. Type 'sway' after logging in on the first console."
         return 0
     fi
     target="$home/$file"
     if grep -q "exec sway" "$target" 2>/dev/null; then return 0; fi
-    mkdir -p "$(dirname "$target")"
+    mkdir -p -- "$(dirname "$target")"
     case "$syntax" in
         sh)
             printf '%s\n' "" "# Start Sway after logging in on the first console (tty1)." \
-                "# Added by gentoo-install.sh. Delete these lines to turn it off." \
+                "# Added by gentoo_install.sh. Delete these lines to turn it off." \
                 "if [ -z \"\${WAYLAND_DISPLAY:-}\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]; then" \
                 "    exec sway${flag}" "fi" >>"$target" ;;
         fish)
             printf '%s\n' "# Start Sway after logging in on the first console (tty1)." \
-                "# Added by gentoo-install.sh. Delete this file to turn it off." \
+                "# Added by gentoo_install.sh. Delete this file to turn it off." \
                 "if status is-login; and test -z \"\$WAYLAND_DISPLAY\"; and test (tty) = /dev/tty1" \
                 "    exec sway${flag}" "end" >"$target" ;;
         csh)
             printf '%s\n' "" "# Start Sway after logging in on the first console (tty1)." \
-                "# Added by gentoo-install.sh. Delete these lines to turn it off." \
+                "# Added by gentoo_install.sh. Delete these lines to turn it off." \
                 "if ( ! \$?WAYLAND_DISPLAY ) then" \
                 "    if ( \"\`tty\`\" == \"/dev/tty1\" ) exec sway${flag}" "endif" >>"$target" ;;
     esac
-    chown -R "${USERNAME}:${USERNAME}" "$home/${file%%/*}"
+    chown -R -- "${USERNAME}:${USERNAME}" "$home/${file%%/*}"
     ok "Sway starts after logging in on tty1 (set up in ~/${file})."
 }
 
@@ -121,7 +121,7 @@ emerge_optional() {
     for p in "$@"; do
         if ! run emerge "${EMERGE_OPTS[@]}" --noreplace "$p"; then
             warn "Could not install ${p}; skipping it. Details are in ${LOG}."
-            echo "$p" >>"$FAILED_PATH"
+            printf '%s\n' "$p" >>"$FAILED_PATH"
         fi
     done
     return 0
@@ -130,14 +130,14 @@ emerge_optional() {
 # enable_service [--boot] NAME [ALTERNATIVE_NAME...]
 enable_service() {
     local runlevel="default" s unit first
-    if [[ ${1:-} == "--boot" ]]; then
+    if [ "${1:-}" = "--boot" ]; then
         runlevel="boot"
         shift
     fi
     first=${1:-}
     for s in "$@"; do
-        if [[ $INIT == "openrc" ]]; then
-            if [[ -e /etc/init.d/$s ]]; then
+        if [ "$INIT" = "openrc" ]; then
+            if [ -e "/etc/init.d/$s" ]; then
                 local shown
                 shown=$(rc-update show "$runlevel" 2>/dev/null || true)
                 if grep -Eq "^[[:space:]]*${s}[[:space:]]*\|" <<<"$shown"; then
@@ -150,7 +150,7 @@ enable_service() {
         else
             unit=$s
             if [[ $unit != *.* ]]; then unit="${unit}.service"; fi
-            if [[ -e /usr/lib/systemd/system/$unit || -e /etc/systemd/system/$unit || -e /lib/systemd/system/$unit ]]; then
+            if [ -e "/usr/lib/systemd/system/$unit" ] || [ -e "/etc/systemd/system/$unit" ] || [ -e "/lib/systemd/system/$unit" ]; then
                 run systemctl enable "$unit"
                 return 0
             fi
@@ -163,16 +163,16 @@ enable_service() {
 # Set KEY="VALUE" in a simple shell-style config file, adding the line if missing.
 set_conf_value() {
     local file=$1 key=$2 value=$3
-    touch "$file"
+    touch -- "$file"
     if grep -q "^${key}=" "$file"; then
-        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$file"
+        sed_inplace "s|^${key}=.*|${key}=\"${value}\"|" "$file"
     else
         printf '%s="%s"\n' "$key" "$value" >>"$file"
     fi
 }
 
 kernel_present() {
-    if [[ $BOOTLOADER == "grub" ]]; then
+    if [ "$BOOTLOADER" = "grub" ]; then
         compgen -G "/boot/vmlinuz-*" >/dev/null || compgen -G "/boot/kernel-*" >/dev/null
     else
         compgen -G "/efi/loader/entries/*.conf" >/dev/null
@@ -193,18 +193,18 @@ c_profile() {
     local cur ver target
     cur=$(readlink /etc/portage/make.profile 2>/dev/null || true)
     ver=$(grep -Eo 'amd64/[0-9]+\.[0-9]+' <<<"$cur" | head -n1 | cut -d/ -f2 || true)
-    if [[ -z $ver ]]; then
-        ver=$(eselect profile list | grep '(stable)' | grep -Eo 'default/linux/amd64/[0-9]+\.[0-9]+' | sort -Vu | tail -n1 | cut -d/ -f4 || true)
+    if [ -z "$ver" ]; then
+        ver=$(eselect profile list | grep '(stable)' | grep -Eo 'default/linux/amd64/[0-9]+\.[0-9]+' | cut -d/ -f4 | LC_ALL=C sort -t. -k1,1n -k2,2n -u | tail -n1 || true)
     fi
-    [[ -n $ver ]] || die "Could not determine the current profile version. Check 'eselect profile list'."
+    [ -n "$ver" ] || die "Could not determine the current profile version. Check 'eselect profile list'."
     target="default/linux/amd64/${ver}${PROFILE_SUFFIX}"
     info "Selecting profile: ${target}"
     # Capture the list first: piping eselect straight into 'grep -q' can make
     # eselect die of SIGPIPE, which pipefail reports as "not found".
     local list
-    list=$(eselect profile list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true)
+    list=$(eselect profile list 2>/dev/null | strip_colors || true)
     if ! grep -Eq "[[:space:]]${target//./\\.}([[:space:]]|\$)" <<<"$list"; then
-        if [[ -d /var/db/repos/gentoo/profiles/${target} ]]; then
+        if [ -d "/var/db/repos/gentoo/profiles/${target}" ]; then
             warn "eselect did not list ${target}, but it exists in the repository. Trying it anyway."
         else
             log "eselect profile list output:"$'\n'"${list}"
@@ -216,7 +216,7 @@ c_profile() {
 }
 
 c_binhost() {
-    if [[ $USE_BINPKG != "yes" ]]; then
+    if [ "$USE_BINPKG" != "yes" ]; then
         info "Binary packages are disabled; skipping."
         return 0
     fi
@@ -228,7 +228,7 @@ c_binhost() {
 }
 
 c_cpuflags() {
-    if [[ $TUNE_CPU_FLAGS != "yes" ]]; then
+    if [ "$TUNE_CPU_FLAGS" != "yes" ]; then
         info "Keeping the profile's default CPU_FLAGS_X86 (as chosen); skipping detection."
         return 0
     fi
@@ -238,36 +238,36 @@ c_cpuflags() {
     local flags
     flags=$(cpuid2cpuflags)
     mkdir -p /etc/portage/package.use
-    printf '# Detected by cpuid2cpuflags (gentoo-install.sh)\n*/* %s\n' "$flags" >/etc/portage/package.use/00cpu-flags
+    printf '# Detected by cpuid2cpuflags (gentoo_install.sh)\n*/* %s\n' "$flags" >/etc/portage/package.use/00cpu-flags
     ok "$flags"
 }
 
 c_locale_time() {
     step_header "Timezone and language" \
         "Sets the timezone (${TIMEZONE}) and generates the locale (${LOCALE}) so that programs show the right time, language and number formats."
-    if [[ -f /usr/share/zoneinfo/$TIMEZONE ]]; then
-        run ln -sf "../usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
+    if [ -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
+        run ln -sf -- "../usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
     else
         warn "Timezone '${TIMEZONE}' does not exist; using UTC. Change it later with: ln -sf ../usr/share/zoneinfo/Region/City /etc/localtime"
         run ln -sf ../usr/share/zoneinfo/UTC /etc/localtime
     fi
     local line
     line=$(grep -m1 "^${LOCALE} " /usr/share/i18n/SUPPORTED || true)
-    if [[ -z $line ]]; then
+    if [ -z "$line" ]; then
         warn "Locale ${LOCALE} is not supported; using en_US.UTF-8."
         LOCALE="en_US.UTF-8"
         line="en_US.UTF-8 UTF-8"
     fi
     {
-        echo "# Locales to generate. Written by gentoo-install.sh. Run locale-gen after editing."
-        echo "$line"
-        if [[ $LOCALE != "en_US.UTF-8" ]]; then echo "en_US.UTF-8 UTF-8"; fi
+        printf '%s\n' "# Locales to generate. Written by gentoo_install.sh. Run locale-gen after editing."
+        printf '%s\n' "$line"
+        if [ "$LOCALE" != "en_US.UTF-8" ]; then printf '%s\n' "en_US.UTF-8 UTF-8"; fi
     } >/etc/locale.gen
     run locale-gen
     if ! run eselect locale set "${LOCALE/.UTF-8/.utf8}"; then
         warn "eselect could not set the locale; set it later with 'eselect locale list' and 'eselect locale set'."
     fi
-    if [[ $INIT == "systemd" ]]; then
+    if [ "$INIT" = "systemd" ]; then
         printf 'LANG=%s\n' "$LOCALE" >/etc/locale.conf
     fi
     run env-update
@@ -294,40 +294,46 @@ c_world() {
 
 c_base_tools() {
     step_header "Install system tools" \
-        "Installs the tools a working Gentoo system needs: Portage helpers (gentoolkit, eclean-kernel), hardware listing (lspci, lsusb), filesystem tools for your disks, and $( [[ $INIT == openrc ]] && echo "a system logger, cron and time synchronisation (sysklogd, cronie, chrony)" || echo "shell completion" ). They are installed before the kernel so the initramfs can include what it needs."
+        "Installs the tools a working Gentoo system needs: Portage helpers (gentoolkit, eclean-kernel), hardware listing (lspci, lsusb), filesystem tools for your disks, and $( [ "$INIT" = openrc ] && printf '%s\n' "a system logger, cron and time synchronisation (sysklogd, cronie, chrony)" || printf '%s\n' "shell completion" ). They are installed before the kernel so the initramfs can include what it needs."
     local -a pkgs=(app-portage/gentoolkit app-admin/eclean-kernel sys-apps/pciutils sys-apps/usbutils
                    app-shells/bash-completion sys-apps/plocate app-arch/unzip)
-    if [[ $BOOT_MODE == "uefi" ]]; then pkgs+=(sys-fs/dosfstools sys-boot/efibootmgr); fi
+    if [ "$BOOT_MODE" = "uefi" ]; then pkgs+=(sys-fs/dosfstools sys-boot/efibootmgr); fi
     case "$FS" in
         xfs) pkgs+=(sys-fs/xfsprogs) ;;
         btrfs) pkgs+=(sys-fs/btrfs-progs) ;;
     esac
-    if [[ $ENCRYPT == "yes" ]]; then pkgs+=(sys-fs/cryptsetup); fi
-    if [[ $INIT == "openrc" ]]; then pkgs+=(app-admin/sysklogd sys-process/cronie net-misc/chrony); fi
-    if [[ $WANT_SSH == "yes" ]]; then pkgs+=(net-misc/openssh); fi
-    if [[ $PRIV_TOOL == "doas" ]]; then pkgs+=(app-admin/doas); else pkgs+=(app-admin/sudo); fi
+    if [ "$ENCRYPT" = "yes" ]; then pkgs+=(sys-fs/cryptsetup); fi
+    if [ "$INIT" = "openrc" ]; then pkgs+=(app-admin/sysklogd sys-process/cronie net-misc/chrony); fi
+    if [ "$WANT_SSH" = "yes" ]; then pkgs+=(net-misc/openssh); fi
+    if [ "$PRIV_TOOL" = "doas" ]; then pkgs+=(app-admin/doas); else pkgs+=(app-admin/sudo); fi
     emerge_pkgs "${pkgs[@]}"
 }
 
 c_firmware() {
-    if [[ $VIRT != "none" ]]; then
+    if [ "$VIRT" != "none" ]; then
         info "Virtual machine detected: device firmware and CPU microcode are not needed; skipping."
         return 0
     fi
     step_header "Install firmware and CPU microcode" \
         "Many devices (Wi-Fi, GPUs, Bluetooth, audio) need firmware files loaded by the kernel. linux-firmware provides them. CPU microcode updates fix CPU bugs and security issues; AMD microcode is part of linux-firmware, Intel's is a separate package."
-    local -a pkgs=(sys-kernel/linux-firmware)
-    if [[ $CPU_VENDOR == "GenuineIntel" ]]; then
-        pkgs+=(sys-firmware/intel-microcode sys-firmware/sof-firmware)
+    # sof-firmware: the Sound Open Firmware used by the audio of most laptops
+    # from about 2019 on, with Intel and with AMD CPUs.
+    local -a pkgs=(sys-kernel/linux-firmware sys-firmware/sof-firmware)
+    if [ "$CPU_VENDOR" = "GenuineIntel" ]; then
+        pkgs+=(sys-firmware/intel-microcode)
     fi
     emerge_pkgs "${pkgs[@]}"
+    if [ "$BCM_WIFI" = "b43" ]; then
+        info "Installing the firmware for this computer's Broadcom Wi-Fi card (b43 driver)."
+        emerge_optional "the Broadcom b43 firmware" sys-firmware/b43-firmware
+    fi
 }
 
 c_system_config() {
     step_header "Basic system configuration" \
         "Hostname, keyboard layout and machine ID."
-    echo "$NEW_HOSTNAME" >/etc/hostname
-    if [[ $INIT == "openrc" ]]; then
+    printf '%s\n' "$NEW_HOSTNAME" >/etc/hostname
+    if [ "$INIT" = "openrc" ]; then
         set_conf_value /etc/conf.d/hostname hostname "$NEW_HOSTNAME"
         set_conf_value /etc/conf.d/keymaps keymap "$KEYMAP"
     else
@@ -336,19 +342,19 @@ c_system_config() {
     if ! grep -qE "[[:space:]]${NEW_HOSTNAME}([[:space:]]|\$)" /etc/hosts; then
         printf '127.0.1.1\t%s\n' "$NEW_HOSTNAME" >>/etc/hosts
     fi
-    if [[ $DE != "none" && ( $XKB_LAYOUT != "us" || -n $XKB_VARIANT ) ]]; then
+    if [ "$DE" != "none" ] && { [ "$XKB_LAYOUT" != "us" ] || [ -n "$XKB_VARIANT" ]; }; then
         mkdir -p /etc/X11/xorg.conf.d
         {
-            echo "# Keyboard layout for X11 sessions. Written by gentoo-install.sh"
-            echo 'Section "InputClass"'
-            echo '    Identifier "system-keyboard"'
-            echo '    MatchIsKeyboard "on"'
-            echo "    Option \"XkbLayout\" \"${XKB_LAYOUT}\""
-            if [[ -n $XKB_VARIANT ]]; then echo "    Option \"XkbVariant\" \"${XKB_VARIANT}\""; fi
-            echo 'EndSection'
+            printf '%s\n' "# Keyboard layout for X11 sessions. Written by gentoo_install.sh"
+            printf '%s\n' 'Section "InputClass"'
+            printf '%s\n' '    Identifier "system-keyboard"'
+            printf '%s\n' '    MatchIsKeyboard "on"'
+            printf '%s\n' "    Option \"XkbLayout\" \"${XKB_LAYOUT}\""
+            if [ -n "$XKB_VARIANT" ]; then printf '%s\n' "    Option \"XkbVariant\" \"${XKB_VARIANT}\""; fi
+            printf '%s\n' 'EndSection'
         } >/etc/X11/xorg.conf.d/00-keyboard.conf
     fi
-    if [[ ! -s /etc/machine-id ]]; then
+    if [ ! -s /etc/machine-id ]; then
         if have systemd-machine-id-setup; then
             run systemd-machine-id-setup
         elif have dbus-uuidgen; then
@@ -361,55 +367,60 @@ c_system_config() {
 }
 
 c_bootloader_prep() {
-    if [[ $BOOTLOADER == "grub" ]]; then
+    if [ "$BOOTLOADER" = "grub" ]; then
         step_header "Install the GRUB bootloader" \
             "GRUB is installed first so that the kernel step can add itself to GRUB's menu automatically."
         local -a pkgs=(sys-boot/grub)
-        if [[ $BOOT_MODE == "uefi" ]]; then pkgs+=(sys-boot/efibootmgr); fi
-        if [[ $DUAL_BOOT == "yes" ]]; then pkgs+=(sys-boot/os-prober); fi
+        if [ "$BOOT_MODE" = "uefi" ]; then pkgs+=(sys-boot/efibootmgr); fi
+        if [ "$DUAL_BOOT" = "yes" ]; then pkgs+=(sys-boot/os-prober); fi
         emerge_pkgs "${pkgs[@]}"
-        if [[ $BOOT_MODE == "uefi" ]]; then
-            local nvram_ok="yes"
-            if [[ ! -d /sys/firmware/efi/efivars ]]; then
-                info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. GRUB also goes to the fallback path EFI/BOOT/BOOTX64.EFI, which the firmware finds by itself."
-                run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
+        if [ "$BOOT_MODE" = "uefi" ]; then
+            local nvram_ok="yes" target="x86_64-efi" fallback="BOOTX64.EFI" loader="grubx64.efi"
+            if [ "$UEFI_BITS" = "32" ]; then
+                # 32-bit UEFI with a 64-bit CPU: GRUB's i386-efi build starts the
+                # 64-bit kernel (the distribution kernel supports EFI mixed mode).
+                target="i386-efi"; fallback="BOOTIA32.EFI"; loader="grubia32.efi"
+            fi
+            if [ ! -d /sys/firmware/efi/efivars ]; then
+                info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. GRUB also goes to the fallback path EFI/BOOT/${fallback}, which the firmware finds by itself."
+                run grub-install --target="$target" --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
                 nvram_ok="no"
-            elif ! run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo; then
+            elif ! run grub-install --target="$target" --efi-directory=/efi --bootloader-id=Gentoo; then
                 warn "Could not add a boot entry to the firmware's boot menu (NVRAM). Installing GRUB without it."
-                run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
+                run grub-install --target="$target" --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
                 nvram_ok="no"
             fi
-            if [[ $PART_MODE == "auto" ]] || [[ $nvram_ok == "no" && ! -e /efi/EFI/BOOT/BOOTX64.EFI ]]; then
-                info "Also installing GRUB at the fallback path EFI/BOOT/BOOTX64.EFI, which firmware finds even without a boot menu entry."
-                run grub-install --target=x86_64-efi --efi-directory=/efi --removable
-            elif [[ $nvram_ok == "no" ]]; then
-                warn "The firmware boot menu may not list Gentoo. After rebooting, pick EFI/Gentoo/grubx64.efi in the firmware boot menu, or add an entry with efibootmgr."
+            if [ "$PART_MODE" = "auto" ] || { [ "$nvram_ok" = "no" ] && [ ! -e "/efi/EFI/BOOT/$fallback" ]; }; then
+                info "Also installing GRUB at the fallback path EFI/BOOT/${fallback}, which firmware finds even without a boot menu entry."
+                run grub-install --target="$target" --efi-directory=/efi --removable
+            elif [ "$nvram_ok" = "no" ]; then
+                warn "The firmware boot menu may not list Gentoo. After rebooting, pick EFI/Gentoo/${loader} in the firmware boot menu, or add an entry with efibootmgr."
             fi
         else
             run grub-install --target=i386-pc "$GRUB_DISK"
         fi
-        if ! grep -q "gentoo-install.sh" /etc/default/grub; then
+        if ! grep -q "gentoo_install.sh" /etc/default/grub; then
             {
-                echo ""
-                echo "# ---- Added by gentoo-install.sh ----"
-                echo "# Extra kernel parameters. root= is added automatically by grub-mkconfig."
-                echo "GRUB_CMDLINE_LINUX=\"${GRUB_EXTRA_CMDLINE}\""
-                if [[ $DUAL_BOOT == "yes" ]]; then
-                    echo "# Look for other operating systems (Windows, other Linux) on every grub-mkconfig run."
-                    echo "GRUB_DISABLE_OS_PROBER=false"
+                printf '%s\n' ""
+                printf '%s\n' "# ---- Added by gentoo_install.sh ----"
+                printf '%s\n' "# Extra kernel parameters. root= is added automatically by grub-mkconfig."
+                printf '%s\n' "GRUB_CMDLINE_LINUX=\"${GRUB_EXTRA_CMDLINE}\""
+                if [ "$DUAL_BOOT" = "yes" ]; then
+                    printf '%s\n' "# Look for other operating systems (Windows, other Linux) on every grub-mkconfig run."
+                    printf '%s\n' "GRUB_DISABLE_OS_PROBER=false"
                 fi
             } >>/etc/default/grub
         fi
     else
         step_header "Install the systemd-boot bootloader" \
             "systemd-boot is installed to the EFI system partition first, so the kernel step can add its boot entries automatically."
-        if [[ $INIT == "openrc" ]]; then
+        if [ "$INIT" = "openrc" ]; then
             run emerge "${EMERGE_OPTS[@]}" --oneshot --update --newuse sys-apps/systemd-utils
         else
             run emerge "${EMERGE_OPTS[@]}" --oneshot --update --newuse sys-apps/systemd
         fi
         local -a bootctl_opts=()
-        if [[ ! -d /sys/firmware/efi/efivars ]]; then
+        if [ ! -d /sys/firmware/efi/efivars ]; then
             info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. systemd-boot is installed at the fallback path EFI/BOOT/BOOTX64.EFI, which the firmware finds by itself."
             bootctl_opts=(--no-variables)
         fi
@@ -418,13 +429,13 @@ c_bootloader_prep() {
             run bootctl install --graceful
         fi
         mkdir -p /efi/loader
-        printf '%s\n' "# systemd-boot menu settings. Written by gentoo-install.sh" "timeout 3" >/efi/loader/loader.conf
+        printf '%s\n' "# systemd-boot menu settings. Written by gentoo_install.sh" "timeout 3" >/efi/loader/loader.conf
     fi
 }
 
 c_kernel() {
     step_header "Install the Linux kernel" \
-        "Installs sys-kernel/${KERNEL_PKG}. installkernel then builds the initramfs with dracut (a small early-boot system that loads the drivers needed to mount your root filesystem$( [[ $ENCRYPT == yes ]] && echo " and asks for your encryption passphrase" )) and registers the kernel with ${BOOTLOADER}."
+        "Installs sys-kernel/${KERNEL_PKG}. installkernel then builds the initramfs with dracut (a small early-boot system that loads the drivers needed to mount your root filesystem$( [ "$ENCRYPT" = yes ] && printf '%s\n' " and asks for your encryption passphrase" )) and registers the kernel with ${BOOTLOADER}."
     emerge_pkgs sys-kernel/installkernel
     emerge_pkgs "sys-kernel/${KERNEL_PKG}"
     if kernel_present; then
@@ -442,7 +453,7 @@ c_network() {
         dhcpcd) emerge_pkgs net-misc/dhcpcd ;;
         networkd)
             mkdir -p /etc/systemd/network
-            printf '%s\n' "# Wired Ethernet via DHCP. Written by gentoo-install.sh" \
+            printf '%s\n' "# Wired Ethernet via DHCP. Written by gentoo_install.sh" \
                 "[Match]" "Name=en* eth*" "" "[Network]" "DHCP=yes" >/etc/systemd/network/20-wired.network
             ok "Wrote /etc/systemd/network/20-wired.network"
             ;;
@@ -452,7 +463,7 @@ c_network() {
 c_users() {
     step_header "User accounts" \
         "Sets the root password, creates '${USERNAME}' in the wheel group, and allows the wheel group to use ${PRIV_TOOL}."
-    if [[ -z $ROOT_HASH || -z $USER_HASH ]]; then
+    if [ -z "$ROOT_HASH" ] || [ -z "$USER_HASH" ]; then
         if id "$USERNAME" >/dev/null 2>&1; then
             info "Accounts were already configured."
             return 0
@@ -468,9 +479,9 @@ c_users() {
     ok "User ${USERNAME} created and password set."
     set_user_shell
 
-    if [[ $PRIV_TOOL == "sudo" ]]; then
+    if [ "$PRIV_TOOL" = "sudo" ]; then
         mkdir -p /etc/sudoers.d
-        printf '%s\n' "# Members of the wheel group may run any command as root. Written by gentoo-install.sh" \
+        printf '%s\n' "# Members of the wheel group may run any command as root. Written by gentoo_install.sh" \
             "%wheel ALL=(ALL:ALL) ALL" >/etc/sudoers.d/10-wheel
         chmod 440 /etc/sudoers.d/10-wheel
         if have visudo && ! visudo -cf /etc/sudoers.d/10-wheel >>"$LOG" 2>&1; then
@@ -479,21 +490,20 @@ c_users() {
         fi
         ok "sudo enabled for the wheel group."
     else
-        printf '%s\n' "# Members of the wheel group may run commands as root. Written by gentoo-install.sh" \
+        printf '%s\n' "# Members of the wheel group may run commands as root. Written by gentoo_install.sh" \
             "permit :wheel" >/etc/doas.conf
         chmod 600 /etc/doas.conf
         ok "doas enabled for the wheel group."
     fi
 
     # The hashes are no longer needed; remove them from the settings file.
-    sed -i -e 's/^declare -g -- ROOT_HASH=.*/declare -g -- ROOT_HASH=""/' \
-           -e 's/^declare -g -- USER_HASH=.*/declare -g -- USER_HASH=""/' "$CONF_PATH"
+    sed_inplace 's/^declare -g -- ROOT_HASH=.*/declare -g -- ROOT_HASH=""/; s/^declare -g -- USER_HASH=.*/declare -g -- USER_HASH=""/' "$CONF_PATH"
     ROOT_HASH=""
     USER_HASH=""
 }
 
 c_desktop() {
-    if [[ $DE == "none" ]]; then
+    if [ "$DE" = "none" ]; then
         info "No desktop selected; skipping."
         return 0
     fi
@@ -516,26 +526,26 @@ c_desktop() {
     esac
     pkgs+=(media-video/pipewire media-video/wireplumber media-fonts/noto media-fonts/noto-emoji x11-misc/xdg-user-dirs)
     case "$DM" in
-        sddm) pkgs+=(x11-misc/sddm) ;;
+        sddm) pkgs+=(gui-apps/sddm) ;;
         gdm) pkgs+=(gnome-base/gdm) ;;
         lightdm) pkgs+=(x11-misc/lightdm x11-misc/lightdm-gtk-greeter) ;;
     esac
-    if [[ $INIT == "openrc" && $DM != "none" ]]; then pkgs+=(gui-libs/display-manager-init); fi
+    if [ "$INIT" = "openrc" ] && [ "$DM" != "none" ]; then pkgs+=(gui-libs/display-manager-init); fi
     emerge_pkgs "${pkgs[@]}"
 
-    if [[ $INIT == "openrc" && $DE == "gnome" ]]; then
+    if [ "$INIT" = "openrc" ] && [ "$DE" = "gnome" ]; then
         emerge_optional "openrc-settingsd (GNOME system settings on OpenRC)" app-admin/openrc-settingsd
     fi
-    if [[ $INIT == "openrc" && $DM != "none" ]]; then
+    if [ "$INIT" = "openrc" ] && [ "$DM" != "none" ]; then
         set_conf_value /etc/conf.d/display-manager DISPLAYMANAGER "$DM"
         ok "Display manager for OpenRC set to ${DM} in /etc/conf.d/display-manager."
     fi
-    if [[ $DM == "lightdm" ]]; then
+    if [ "$DM" = "lightdm" ]; then
         mkdir -p /etc/lightdm/lightdm.conf.d
-        printf '%s\n' "# Written by gentoo-install.sh" "[Seat:*]" "greeter-session=lightdm-gtk-greeter" \
+        printf '%s\n' "# Written by gentoo_install.sh" "[Seat:*]" "greeter-session=lightdm-gtk-greeter" \
             >/etc/lightdm/lightdm.conf.d/50-gentoo-install.conf
     fi
-    if [[ $DM == "sddm" ]] && getent passwd sddm >/dev/null; then
+    if [ "$DM" = "sddm" ] && getent passwd sddm >/dev/null; then
         usermod -aG video sddm || true
     fi
     info "Deleting the downloaded binary packages (already installed; they only take up space)."
@@ -544,43 +554,47 @@ c_desktop() {
 
 setup_zram() {
     mkdir -p /usr/local/sbin
-    cat >/usr/local/sbin/zram-swap <<'EOF'
+    cat >/usr/local/sbin/zram_swap <<'EOF'
 #!/bin/sh
-# Compressed swap in RAM (zram). Installed by gentoo-install.sh.
+# Compressed swap in RAM (zram). Installed by gentoo_install.sh.
 # Size: equal to RAM, capped at 8 GiB. Memory is only used for pages actually swapped.
-case "$1" in
+set -u
+case "${1:-}" in
     start)
         modprobe zram 2>/dev/null || true
-        [ -e /sys/block/zram0 ] || { echo "zram-swap: zram is not available" >&2; exit 1; }
-        grep -q '^/dev/zram0 ' /proc/swaps && exit 0
+        if [ ! -e /sys/block/zram0 ]; then
+            printf '%s\n' "zram_swap: zram is not available" >&2
+            exit 1
+        fi
+        if grep -q '^/dev/zram0 ' /proc/swaps; then exit 0; fi
         mem_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
         cap_kib=$((8 * 1024 * 1024))
         size_kib=$mem_kib
-        [ "$size_kib" -gt "$cap_kib" ] && size_kib=$cap_kib
-        echo 1 > /sys/block/zram0/reset 2>/dev/null || true
-        echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-        echo "${size_kib}K" > /sys/block/zram0/disksize
+        if [ "$size_kib" -gt "$cap_kib" ]; then size_kib=$cap_kib; fi
+        printf '%s\n' 1 >/sys/block/zram0/reset 2>/dev/null || true
+        printf '%s\n' zstd >/sys/block/zram0/comp_algorithm 2>/dev/null || true
+        printf '%sK\n' "$size_kib" >/sys/block/zram0/disksize
         mkswap /dev/zram0 >/dev/null
         swapon -p 100 /dev/zram0
         ;;
     stop)
         swapoff /dev/zram0 2>/dev/null || true
-        echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+        printf '%s\n' 1 >/sys/block/zram0/reset 2>/dev/null || true
         ;;
     *)
-        echo "usage: zram-swap start|stop" >&2
+        printf '%s\n' "usage: zram_swap start|stop" >&2
         exit 2
         ;;
 esac
 EOF
-    chmod 755 /usr/local/sbin/zram-swap
-    if [[ $INIT == "openrc" ]]; then
+    chmod 755 /usr/local/sbin/zram_swap
+    if [ "$INIT" = "openrc" ]; then
         mkdir -p /etc/local.d
-        printf '#!/bin/sh\n/usr/local/sbin/zram-swap start\n' >/etc/local.d/zram-swap.start
-        printf '#!/bin/sh\n/usr/local/sbin/zram-swap stop\n' >/etc/local.d/zram-swap.stop
-        chmod 755 /etc/local.d/zram-swap.start /etc/local.d/zram-swap.stop
+        printf '#!/bin/sh\n/usr/local/sbin/zram_swap start\n' >/etc/local.d/zram_swap.start
+        printf '#!/bin/sh\n/usr/local/sbin/zram_swap stop\n' >/etc/local.d/zram_swap.stop
+        chmod 755 /etc/local.d/zram_swap.start /etc/local.d/zram_swap.stop
     else
-        cat >/etc/systemd/system/zram-swap.service <<'EOF'
+        cat >/etc/systemd/system/zram_swap.service <<'EOF'
 [Unit]
 Description=Compressed swap in RAM (zram)
 DefaultDependencies=no
@@ -590,8 +604,8 @@ Conflicts=shutdown.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/zram-swap start
-ExecStop=/usr/local/sbin/zram-swap stop
+ExecStart=/usr/local/sbin/zram_swap start
+ExecStop=/usr/local/sbin/zram_swap stop
 
 [Install]
 WantedBy=swap.target
@@ -603,33 +617,65 @@ EOF
 c_hardware() {
     step_header "Drivers and hardware support" \
         "Installs graphics, Bluetooth, printing and virtual machine support as selected, and sets up swap and SSD maintenance."
-    if [[ $GPU_DRIVER == "nvidia" ]]; then
+    if [ "$GPU_DRIVER" = "nvidia" ]; then
         info "Installing the proprietary NVIDIA driver. Its kernel module is built for the installed kernel and rebuilt automatically on kernel updates (USE=dist-kernel)."
         emerge_optional "the NVIDIA driver" x11-drivers/nvidia-drivers
     fi
     local -a pkgs=()
-    if [[ $WANT_BT == "yes" ]]; then
+    if [ "$WANT_BT" = "yes" ]; then
         pkgs+=(net-wireless/bluez)
         case "$DE" in
             xfce|mate|lxqt|cinnamon|i3|sway) pkgs+=(net-wireless/blueman) ;;
         esac
     fi
-    if [[ $WANT_CUPS == "yes" ]]; then pkgs+=(net-print/cups); fi
+    if [ "$WANT_CUPS" = "yes" ]; then pkgs+=(net-print/cups); fi
+    if [ "$WANT_POWER" = "yes" ]; then
+        if [ "$POWER_TOOL" = "ppd" ]; then pkgs+=(sys-power/power-profiles-daemon); else pkgs+=(sys-power/tlp); fi
+        if [ "$CPU_VENDOR" = "GenuineIntel" ]; then pkgs+=(sys-power/thermald); fi
+    fi
+    if [ "$HYBRID_GPU" = "yes" ]; then
+        case "$DE" in
+            plasma|gnome) pkgs+=(sys-power/switcheroo-control) ;;
+        esac
+    fi
     case "$VIRT" in
         kvm)
             pkgs+=(app-emulation/qemu-guest-agent)
-            if [[ $DE != "none" ]]; then pkgs+=(app-emulation/spice-vdagent); fi
+            if [ "$DE" != "none" ]; then pkgs+=(app-emulation/spice-vdagent); fi
             ;;
         vmware) pkgs+=(app-emulation/open-vm-tools) ;;
         virtualbox) pkgs+=(app-emulation/virtualbox-guest-additions) ;;
     esac
     emerge_optional "hardware support packages" "${pkgs[@]}"
 
-    if [[ $SWAP_MODE == "zram" ]]; then setup_zram; fi
+    if [ "$WANT_MBPFAN" = "yes" ]; then
+        info "Installing mbpfan (fan control for Intel Macs)."
+        emerge_optional "mbpfan" app-laptop/mbpfan
+        # mbpfan reads the Mac's sensors through these two modules. Both
+        # usually load by themselves; listing them makes sure.
+        mkdir -p /etc/modules-load.d
+        printf '%s\n' "# Sensors for mbpfan. Written by gentoo_install.sh" "applesmc" "coretemp" \
+            >/etc/modules-load.d/mbpfan.conf
+    fi
 
-    if [[ $IS_SSD == "yes" && $INIT == "openrc" ]]; then
+    if [ "$WANT_BCM_WL" = "yes" ]; then
+        info "Installing Broadcom's wl Wi-Fi driver. It is compiled against the installed kernel, so this needs the kernel's build files (the distribution kernel provides them)."
+        emerge_optional "the Broadcom wl driver" net-wireless/broadcom-sta
+        # The open drivers claim the same cards first and keep wl from working.
+        mkdir -p /etc/modprobe.d
+        printf '%s\n' "# Written by gentoo_install.sh: this computer's Broadcom Wi-Fi card needs the" \
+            "# proprietary wl driver (net-wireless/broadcom-sta). These open drivers would" \
+            "# claim the card first. Delete this file if you replace the card." \
+            "blacklist b43" "blacklist b43legacy" "blacklist bcma" "blacklist ssb" \
+            "blacklist brcmsmac" "blacklist brcmfmac" >/etc/modprobe.d/broadcom-wl-blacklist.conf
+        ok "Blocked the open Broadcom drivers in /etc/modprobe.d/broadcom-wl-blacklist.conf."
+    fi
+
+    if [ "$SWAP_MODE" = "zram" ]; then setup_zram; fi
+
+    if [ "$IS_SSD" = "yes" ] && [ "$INIT" = "openrc" ]; then
         mkdir -p /etc/cron.weekly
-        printf '%s\n' "#!/bin/sh" "# Tell the SSD which blocks are free (TRIM). Written by gentoo-install.sh" \
+        printf '%s\n' "#!/bin/sh" "# Tell the SSD which blocks are free (TRIM). Written by gentoo_install.sh" \
             "fstrim --all --quiet" >/etc/cron.weekly/fstrim
         chmod 755 /etc/cron.weekly/fstrim
         ok "Weekly SSD TRIM scheduled (cron)."
@@ -637,18 +683,18 @@ c_hardware() {
 }
 
 c_software() {
-    if [[ -z $EXTRA_PKGS && $WANT_FLATPAK != "yes" ]]; then
+    if [ -z "$EXTRA_PKGS" ] && [ "$WANT_FLATPAK" != "yes" ]; then
         info "No additional software selected; skipping."
         return 0
     fi
     step_header "Install your selected applications" \
         "Optional software. If a package fails to install, it is skipped and listed at the end; the rest of the system is not affected."
-    if [[ -n $EXTRA_PKGS ]]; then
+    if [ -n "$EXTRA_PKGS" ]; then
         local -a extra=()
         read -ra extra <<<"$EXTRA_PKGS"
         emerge_optional "the selected native packages" "${extra[@]}"
     fi
-    if [[ $WANT_FLATPAK != "yes" ]]; then return 0; fi
+    if [ "$WANT_FLATPAK" != "yes" ]; then return 0; fi
 
     emerge_optional "Flatpak" sys-apps/flatpak
     if ! have flatpak; then
@@ -659,24 +705,24 @@ c_software() {
     read -ra apps <<<"$FLATPAK_APPS"
     mkdir -p /usr/local/sbin
     {
-        echo "#!/bin/sh"
-        echo "# Adds Flathub and installs the Flatpak apps chosen during installation."
-        echo "# Written by gentoo-install.sh. Safe to run again."
-        echo "set -e"
-        echo "flatpak remote-add --if-not-exists flathub ${FLATHUB_URL}"
-        if (( ${#apps[@]} > 0 )); then echo "flatpak install -y --noninteractive flathub ${apps[*]}"; fi
-    } >/usr/local/sbin/install-my-flatpaks
-    chmod 755 /usr/local/sbin/install-my-flatpaks
+        printf '%s\n' "#!/bin/sh"
+        printf '%s\n' "# Adds Flathub and installs the Flatpak apps chosen during installation."
+        printf '%s\n' "# Written by gentoo_install.sh. Safe to run again."
+        printf '%s\n' "set -e"
+        printf '%s\n' "flatpak remote-add --if-not-exists flathub ${FLATHUB_URL}"
+        if (( ${#apps[@]} > 0 )); then printf '%s\n' "flatpak install -y --noninteractive flathub ${apps[*]}"; fi
+    } >/usr/local/sbin/install_my_flatpaks
+    chmod 755 /usr/local/sbin/install_my_flatpaks
 
     if ! run flatpak remote-add --if-not-exists flathub "$FLATHUB_URL"; then
-        warn "Could not add Flathub inside the installer. Run '${PRIV_TOOL} /usr/local/sbin/install-my-flatpaks' after the first boot."
+        warn "Could not add Flathub inside the installer. Run '${PRIV_TOOL} /usr/local/sbin/install_my_flatpaks' after the first boot."
         touch /root/.gentoo-install-flatpak-pending
         return 0
     fi
     if (( ${#apps[@]} > 0 )); then
         info "Installing Flatpak apps: ${apps[*]} (large downloads; the first app also pulls in its runtime)."
         if ! run flatpak install -y --noninteractive flathub "${apps[@]}"; then
-            warn "Some Flatpak apps could not be installed inside the installer. Run '${PRIV_TOOL} /usr/local/sbin/install-my-flatpaks' after the first boot."
+            warn "Some Flatpak apps could not be installed inside the installer. Run '${PRIV_TOOL} /usr/local/sbin/install_my_flatpaks' after the first boot."
             touch /root/.gentoo-install-flatpak-pending
         fi
     fi
@@ -685,7 +731,7 @@ c_software() {
 c_services() {
     step_header "Enable services" \
         "Services are programs that start at boot and run in the background (networking, login screen, logging and so on). This step turns on the ones this system needs."
-    if [[ $INIT == "systemd" ]]; then
+    if [ "$INIT" = "systemd" ]; then
         run systemctl preset-all --preset-mode=enable-only
         enable_service systemd-timesyncd
     else
@@ -703,33 +749,51 @@ c_services() {
             ;;
     esac
 
-    if [[ $DE != "none" && $INIT == "openrc" ]]; then
+    if [ "$DE" != "none" ] && [ "$INIT" = "openrc" ]; then
         enable_service dbus
         enable_service --boot elogind
-        if [[ $DE == "gnome" ]]; then enable_service openrc-settingsd; fi
+        if [ "$DE" = "gnome" ]; then enable_service openrc-settingsd; fi
     fi
-    if [[ $DM != "none" ]]; then
-        if [[ $INIT == "openrc" ]]; then enable_service display-manager; else enable_service "$DM"; fi
+    if [ "$DM" != "none" ]; then
+        if [ "$INIT" = "openrc" ]; then enable_service display-manager; else enable_service "$DM"; fi
     fi
-    if [[ $WANT_BT == "yes" ]]; then enable_service bluetooth; fi
-    if [[ $WANT_CUPS == "yes" ]]; then
-        if [[ $INIT == "openrc" ]]; then enable_service cupsd; else enable_service cups.socket cups; fi
+    if [ "$WANT_BT" = "yes" ]; then enable_service bluetooth; fi
+    if [ "$WANT_CUPS" = "yes" ]; then
+        if [ "$INIT" = "openrc" ]; then enable_service cupsd; else enable_service cups.socket cups; fi
     fi
-    if [[ $WANT_SSH == "yes" ]]; then enable_service sshd; fi
+    if [ "$WANT_SSH" = "yes" ]; then enable_service sshd; fi
     case "$VIRT" in
         kvm)
             enable_service qemu-guest-agent qemu-ga
-            if [[ $DE != "none" ]]; then enable_service spice-vdagentd spice-vdagent; fi
+            if [ "$DE" != "none" ]; then enable_service spice-vdagentd spice-vdagent; fi
             ;;
         vmware) enable_service vmtoolsd vmware-tools open-vm-tools ;;
         virtualbox) enable_service virtualbox-guest-additions vboxservice ;;
     esac
-    if [[ $SWAP_MODE == "zram" ]]; then
-        if [[ $INIT == "openrc" ]]; then enable_service local; else enable_service zram-swap; fi
+    if [ "$SWAP_MODE" = "zram" ]; then
+        if [ "$INIT" = "openrc" ]; then enable_service local; else enable_service zram_swap; fi
     fi
-    if [[ $IS_SSD == "yes" && $INIT == "systemd" ]]; then enable_service fstrim.timer; fi
+    if [ "$IS_SSD" = "yes" ] && [ "$INIT" = "systemd" ]; then enable_service fstrim.timer; fi
+    if [ "$WANT_POWER" = "yes" ]; then
+        if [ "$POWER_TOOL" = "ppd" ]; then
+            enable_service power-profiles-daemon
+        else
+            enable_service tlp
+            if [ "$INIT" = "systemd" ] && [ -e /usr/lib/systemd/system/tlp.service ]; then
+                # TLP handles the radio switches itself, as its documentation asks.
+                run systemctl mask systemd-rfkill.service systemd-rfkill.socket || true
+            fi
+        fi
+        if [ "$CPU_VENDOR" = "GenuineIntel" ]; then enable_service thermald; fi
+    fi
+    if [ "$HYBRID_GPU" = "yes" ]; then
+        case "$DE" in
+            plasma|gnome) enable_service switcheroo-control ;;
+        esac
+    fi
+    if [ "$WANT_MBPFAN" = "yes" ]; then enable_service mbpfan; fi
 
-    if [[ $INIT == "systemd" && $DE != "none" ]]; then
+    if [ "$INIT" = "systemd" ] && [ "$DE" != "none" ]; then
         info "Enabling PipeWire audio for all users (systemd user services)."
         if ! run systemctl --global enable pipewire.socket pipewire-pulse.socket; then
             warn "Could not enable the PipeWire sockets globally."
@@ -743,7 +807,7 @@ c_services() {
 c_bootloader_final() {
     step_header "Finish the bootloader configuration" \
         "Regenerates the boot menu now that everything is installed and checks that the kernel is in it."
-    if [[ $BOOTLOADER == "grub" ]]; then
+    if [ "$BOOTLOADER" = "grub" ]; then
         run grub-mkconfig -o /boot/grub/grub.cfg
         if ! grep -Eq '^[[:space:]]*linux[[:space:]]' /boot/grub/grub.cfg; then
             warn "The GRUB menu has no Linux entry. Reinstalling the kernel and trying again."
@@ -763,7 +827,10 @@ c_bootloader_final() {
             fi
         fi
         ok "systemd-boot entries:"
-        find /efi/loader/entries -name '*.conf' -printf '    %f\n'
+        local entry
+        for entry in /efi/loader/entries/*.conf; do
+            if [ -e "$entry" ]; then printf '    %s\n' "${entry##*/}"; fi
+        done
     fi
 }
 
@@ -772,50 +839,50 @@ setup_user_desktop() {
     case "$DE" in
         sway)
             cfg="$home/.config/sway/config"
-            if [[ ! -f $cfg && -f /etc/sway/config ]]; then
-                mkdir -p "$home/.config/sway"
+            if [ ! -f "$cfg" ] && [ -f /etc/sway/config ]; then
+                mkdir -p -- "$home/.config/sway"
                 cp /etc/sway/config "$cfg"
                 # shellcheck disable=SC2016  # $menu is a Sway variable, not a shell one
-                sed -i 's/^set \$menu .*/set $menu wofi --show drun/' "$cfg"
+                sed_inplace 's/^set \$menu .*/set $menu wofi --show drun/' "$cfg"
                 {
-                    echo ""
-                    echo "# ---- Added by gentoo-install.sh ----"
-                    if [[ $XKB_LAYOUT != "us" || -n $XKB_VARIANT ]]; then
-                        echo "input type:keyboard {"
-                        echo "    xkb_layout ${XKB_LAYOUT}"
-                        if [[ -n $XKB_VARIANT ]]; then echo "    xkb_variant ${XKB_VARIANT}"; fi
-                        echo "}"
+                    printf '%s\n' ""
+                    printf '%s\n' "# ---- Added by gentoo_install.sh ----"
+                    if [ "$XKB_LAYOUT" != "us" ] || [ -n "$XKB_VARIANT" ]; then
+                        printf '%s\n' "input type:keyboard {"
+                        printf '%s\n' "    xkb_layout ${XKB_LAYOUT}"
+                        if [ -n "$XKB_VARIANT" ]; then printf '%s\n' "    xkb_variant ${XKB_VARIANT}"; fi
+                        printf '%s\n' "}"
                     fi
-                    echo "# Notifications"
-                    echo "exec mako"
-                    if [[ $INIT == "openrc" ]]; then
-                        echo "# OpenRC has no per-user service manager, so start PipeWire (audio) here."
-                        echo "exec gentoo-pipewire-launcher"
+                    printf '%s\n' "# Notifications"
+                    printf '%s\n' "exec mako"
+                    if [ "$INIT" = "openrc" ]; then
+                        printf '%s\n' "# OpenRC has no per-user service manager, so start PipeWire (audio) here."
+                        printf '%s\n' "exec gentoo-pipewire-launcher"
                     fi
                 } >>"$cfg"
             fi
-            if [[ $SWAY_AUTOSTART == "yes" ]]; then
-                if [[ $GPU_DRIVER == "nvidia" ]]; then flag=" --unsupported-gpu"; fi
+            if [ "$SWAY_AUTOSTART" = "yes" ]; then
+                if [ "$GPU_DRIVER" = "nvidia" ]; then flag=" --unsupported-gpu"; fi
                 write_sway_autostart "$home" "$flag"
             fi
             ;;
         i3)
             cfg="$home/.config/i3/config"
-            if [[ ! -f $cfg && -f /etc/i3/config ]]; then
-                mkdir -p "$home/.config/i3"
+            if [ ! -f "$cfg" ] && [ -f /etc/i3/config ]; then
+                mkdir -p -- "$home/.config/i3"
                 cp /etc/i3/config "$cfg"
-                if [[ $INIT == "openrc" ]]; then
+                if [ "$INIT" = "openrc" ]; then
                     {
-                        echo ""
-                        echo "# ---- Added by gentoo-install.sh ----"
-                        echo "# OpenRC has no per-user service manager, so start PipeWire (audio) here."
-                        echo "exec --no-startup-id gentoo-pipewire-launcher"
+                        printf '%s\n' ""
+                        printf '%s\n' "# ---- Added by gentoo_install.sh ----"
+                        printf '%s\n' "# OpenRC has no per-user service manager, so start PipeWire (audio) here."
+                        printf '%s\n' "exec --no-startup-id gentoo-pipewire-launcher"
                     } >>"$cfg"
                 fi
             fi
             ;;
     esac
-    if [[ -d $home ]]; then chown -R "${USERNAME}:" "$home"; fi
+    if [ -d "$home" ]; then chown -R -- "${USERNAME}:" "$home"; fi
 }
 
 write_notes() {
@@ -825,7 +892,7 @@ write_notes() {
         cat <<EOF
 Gentoo post-install notes
 =========================
-Written by gentoo-install.sh ${SCRIPT_VERSION} on $(date -u '+%Y-%m-%d').
+Written by gentoo_install.sh ${SCRIPT_VERSION} on $(date -u '+%Y-%m-%d').
 
 Your system
 -----------
@@ -834,16 +901,16 @@ Your system
   Profile:           ${profile}
   Kernel:            sys-kernel/${KERNEL_PKG} (distribution kernel)
   Bootloader:        ${BOOTLOADER} (${BOOT_MODE^^})
-  Root filesystem:   ${FS}$( [[ $ENCRYPT == yes ]] && echo " on LUKS2 encryption" )
+  Root filesystem:   ${FS}$( [ "$ENCRYPT" = yes ] && printf '%s' " on LUKS2 encryption" )
   Compiler flags:    -march=native -O2 -pipe
   MAKEOPTS:          -j${MAKE_JOBS} -l${NPROC}
   Binary packages:   ${USE_BINPKG}
   Portage config:    /etc/portage/make.conf (every setting is explained in comments)
   Install logs:      /var/log/gentoo-install.log and /var/log/gentoo-install-live.log
 
-The easy way: gentoo-helper
+The easy way: gentoo_helper
 ---------------------------
-Open a terminal and run:  gentoo-helper
+Open a terminal and run:  gentoo_helper
 It gives you menus to update the system, find and install software (ready-made
 or compiled), remove packages, clean up, read Gentoo news and review
 configuration updates. It shows what it will do and asks before doing it, and
@@ -875,13 +942,13 @@ Installing software
   emerge -av <category/package>   # install one
   equery uses <package>           # show a package's USE flags (gentoolkit)
 EOF
-        if [[ $NET_TOOL == "networkmanager" ]]; then
+        if [ "$NET_TOOL" = "networkmanager" ]; then
             printf '\nNetworking\n----------\nNetworkManager is enabled. Connect to Wi-Fi from the desktop network icon, or\nin a terminal with: nmtui\n'
         fi
-        if [[ $WANT_FLATPAK == "yes" ]]; then
+        if [ "$WANT_FLATPAK" = "yes" ]; then
             printf '\nFlatpak\n-------\n  flatpak search <name>\n  flatpak install flathub <app-id>\n  flatpak update            # Flatpaks update separately from emerge\n'
-            if [[ -e /root/.gentoo-install-flatpak-pending ]]; then
-                printf '\nYour chosen Flatpak apps were not (all) installed during setup. After the first\nboot, connected to the internet, run:  %s /usr/local/sbin/install-my-flatpaks\n' "$PRIV_TOOL"
+            if [ -e /root/.gentoo-install-flatpak-pending ]; then
+                printf '\nYour chosen Flatpak apps were not (all) installed during setup. After the first\nboot, connected to the internet, run:  %s /usr/local/sbin/install_my_flatpaks\n' "$PRIV_TOOL"
             fi
         fi
         local login_sh
@@ -891,27 +958,40 @@ EOF
             fish|nu) printf 'This shell does not read /etc/profile. If a program is missing from PATH or an\nenvironment setting is not applied, add it to the shell'"'"'s own configuration.\n' ;;
             zsh) printf 'A starter ~/.zshrc was written (history, completion, the Gentoo prompt).\n' ;;
         esac
-        if [[ $DE == "sway" ]]; then
+        if [ "$DE" = "sway" ]; then
             printf '\nSway\n----\nSuper+Enter opens a terminal (foot), Super+d the app launcher (wofi),\nSuper+Shift+e exits. Your config: ~/.config/sway/config (man 5 sway).\n'
         fi
-        if [[ $DE == "i3" ]]; then
+        if [ "$DE" = "i3" ]; then
             # shellcheck disable=SC2016  # $mod is an i3 variable, not a shell one
             printf '\ni3\n--\nAlt+Enter opens a terminal, Alt+d the launcher (dmenu), Alt+Shift+e exits.\nYour config: ~/.config/i3/config. Change "set $mod Mod1" to Mod4 for the Super key.\n'
         fi
-        if [[ $DE == "gnome" && $INIT == "openrc" ]]; then
+        if [ "$DE" = "gnome" ] && [ "$INIT" = "openrc" ]; then
             printf '\nGNOME on OpenRC\n---------------\nGNOME is developed against systemd. If a Settings panel does not work, check the\nGentoo wiki page "GNOME" for the OpenRC notes.\n'
         fi
-        if [[ $GPU_DRIVER == "nvidia" ]]; then
+        if [ "$GPU_DRIVER" = "nvidia" ]; then
             printf '\nNVIDIA\n------\nThe proprietary driver is rebuilt automatically when the kernel updates.\nnvidia_drm.modeset=1 is set on the kernel command line (current drivers enable\nit by default; it matters for older branches and Wayland).\n'
-            if [[ $NVIDIA_GEN == "legacy580" ]]; then
+            if [ "$NVIDIA_GEN" = "legacy580" ]; then
                 printf 'This card is supported up to the 580 driver branch, so newer branches are\nblocked in /etc/portage/package.mask/gentoo-install and updates stay on 580.\n'
             else
                 printf 'If the card stops working after a driver update, see the Gentoo wiki page\n"NVIDIA/nvidia-drivers".\n'
             fi
         fi
-        if [[ $DUAL_BOOT == "yes" ]]; then
+        if [ "$WANT_BCM_WL" = "yes" ]; then
+            printf '\nBroadcom Wi-Fi\n--------------\nThe wl driver (net-wireless/broadcom-sta) is a testing version, allowed in\n/etc/portage/package.accept_keywords/gentoo-install. It is rebuilt when the\nkernel updates. If Wi-Fi stops working after a kernel update, the driver may\nnot support that kernel yet: pick the previous kernel in the boot menu.\nThe open drivers that would claim the card are blocked in\n/etc/modprobe.d/broadcom-wl-blacklist.conf.\n'
+        fi
+        if [ "$WANT_MBPFAN" = "yes" ]; then
+            printf '\nMac fan control\n---------------\nmbpfan runs as a service and sets the fan speed from the CPU temperature.\nIts settings (temperatures, fan speeds) are in /etc/mbpfan.conf.\n'
+        fi
+        if [ "$WANT_POWER" = "yes" ]; then
+            if [ "$POWER_TOOL" = "ppd" ]; then
+                printf '\nPower management\n----------------\nSwitch between power saving, balanced and performance in the battery menu,\nor with: powerprofilesctl set power-saver|balanced|performance\n'
+            else
+                printf '\nPower management\n----------------\nTLP applies power saving settings at boot and when switching between battery\nand mains. Settings: /etc/tlp.conf. Status: tlp-stat -s\n'
+            fi
+        fi
+        if [ "$DUAL_BOOT" = "yes" ]; then
             printf '\nDual boot\n---------\n'
-            if [[ $BOOTLOADER == "grub" ]]; then
+            if [ "$BOOTLOADER" = "grub" ]; then
                 printf 'GRUB runs os-prober to add other systems to its menu. If one is missing,\nrun: grub-mkconfig -o /boot/grub/grub.cfg\n'
             else
                 printf 'systemd-boot lists Windows automatically if its boot loader is on the same\nEFI system partition. Other systems need a loader entry; see man loader.conf.\n'
@@ -919,15 +999,15 @@ EOF
             printf 'Windows keeps the hardware clock in local time, Linux in UTC. If the clock is\nwrong after switching systems, set Windows to use UTC (search "RealTimeIsUniversal").\n'
         fi
         printf '\nMoving this disk to another computer\n------------------------------------\nThe system is built for this CPU (-march=native) with a host-only initramfs.\nBefore moving the disk, change -march=native to a generic value such as\n-march=x86-64-v2 in make.conf, rebuild (emerge -e @world), set hostonly="no" in\n/etc/dracut.conf.d/10-gentoo-install.conf and run: emerge --config sys-kernel/%s\n' "$KERNEL_PKG"
-        if [[ -s $FAILED_PATH ]]; then
+        if [ -s "$FAILED_PATH" ]; then
             printf '\nOptional packages that failed to install\n----------------------------------------\n'
             sed 's/^/  /' "$FAILED_PATH"
             printf 'Try again with: emerge --ask <package> and read the error message.\n'
         fi
     } >"$f"
-    if id "$USERNAME" >/dev/null 2>&1 && [[ -d /home/$USERNAME ]]; then
-        cp "$f" "/home/${USERNAME}/${NOTES_NAME}"
-        chown "${USERNAME}:" "/home/${USERNAME}/${NOTES_NAME}"
+    if id "$USERNAME" >/dev/null 2>&1 && [ -d "/home/$USERNAME" ]; then
+        cp -- "$f" "/home/${USERNAME}/${NOTES_NAME}"
+        chown -- "${USERNAME}:" "/home/${USERNAME}/${NOTES_NAME}"
     fi
     ok "Wrote ${f}"
 }
@@ -946,11 +1026,11 @@ c_finish() {
     setup_user_desktop
     if declare -F install_gentoo_helper >/dev/null; then
         install_gentoo_helper
-        ok "Installed gentoo-helper (/usr/local/bin/gentoo-helper): simple menus for installing software and updating the system."
+        ok "Installed gentoo_helper (/usr/local/bin/gentoo_helper): simple menus for installing software and updating the system."
     fi
     write_notes
     local news
-    news=$(eselect news count new 2>/dev/null || echo 0)
+    news=$(eselect news count new 2>/dev/null || printf '%s\n' 0)
     if [[ $news =~ ^[0-9]+$ ]] && (( news > 0 )); then
         info "There are ${news} unread Gentoo news items. Read them after booting with: eselect news read"
     fi
@@ -959,16 +1039,16 @@ c_finish() {
 # Rough minimum free space (GiB) needed before a step starts.
 step_min_free_gib() {
     case "$1" in
-        c_world) echo 4 ;;
+        c_world) printf '%s\n' 4 ;;
         c_desktop)
             case "$DE" in
-                plasma|gnome|cinnamon) echo 8 ;;
-                none) echo 1 ;;
-                *) echo 4 ;;
+                plasma|gnome|cinnamon) printf '%s\n' 8 ;;
+                none) printf '%s\n' 1 ;;
+                *) printf '%s\n' 4 ;;
             esac ;;
-        c_software) echo 3 ;;
-        c_kernel|c_firmware|c_bootloader_prep|c_base_tools|c_hardware) echo 2 ;;
-        *) echo 1 ;;
+        c_software) printf '%s\n' 3 ;;
+        c_kernel|c_firmware|c_bootloader_prep|c_base_tools|c_hardware) printf '%s\n' 2 ;;
+        *) printf '%s\n' 1 ;;
     esac
 }
 
@@ -988,20 +1068,21 @@ check_disk_space() {
         return 0
     fi
     say "Space used by the largest directories:"
-    du -xsh /usr /var /opt /home /root 2>/dev/null | sort -rh | sed 's/^/    /' || true
+    du -xsk /usr /var /opt /home /root 2>/dev/null | LC_ALL=C sort -rn \
+        | awk '{printf "    %6d MiB  %s\n", $1 / 1024, $2}' || true
     die "Not enough disk space: $(( avail_kib / 1024 )) MiB free, roughly ${need_gib} GiB needed for the next step. The disk (or root partition) is too small for this installation; ${MIN_DESKTOP_DISK_GIB} GiB or more is needed for a desktop. Enlarge it, or start over on a larger disk."
 }
 
 chroot_stage() {
     IN_CHROOT="yes"
     LOG="$TARGET_LOG"
-    mkdir -p "$(dirname "$LOG")"
-    touch "$LOG"
-    [[ -f $CONF_PATH ]] || die "The settings file ${CONF_PATH} is missing."
+    mkdir -p -- "$(dirname "$LOG")"
+    touch -- "$LOG"
+    [ -f "$CONF_PATH" ] || die "The settings file ${CONF_PATH} is missing."
     safe_source /etc/profile
     init_defaults
     load_config "$CONF_PATH"
-    touch "$PROGRESS_PATH"
+    touch -- "$PROGRESS_PATH"
     log "chroot stage started"
     info "While packages build, their compiler output goes to Portage's build logs instead of the screen; you will see one line per package. If a build fails, the relevant part of its log is shown."
     local total=${#CHROOT_STEPS[@]} i=0 s
@@ -1015,7 +1096,7 @@ chroot_stage() {
         check_disk_space "$s"
         ensure_blocking_stdio
         "$s"
-        echo "$s" >>"$PROGRESS_PATH"
+        printf '%s\n' "$s" >>"$PROGRESS_PATH"
         ok "Step ${CURRENT_STEP} finished."
     done
 }

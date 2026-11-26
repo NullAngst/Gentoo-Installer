@@ -3,7 +3,7 @@
 # Disk preparation
 # ----------------------------------------------------------------------------
 root_fs_dev() {
-    if [[ $ENCRYPT == "yes" ]]; then echo "/dev/mapper/${LUKS_NAME}"; else echo "$ROOT_PART"; fi
+    if [ "$ENCRYPT" = "yes" ]; then printf '%s\n' "/dev/mapper/${LUKS_NAME}"; else printf '%s\n' "$ROOT_PART"; fi
 }
 
 blk_uuid() {
@@ -16,23 +16,23 @@ release_target() {
         warn "Something is still mounted at ${MNT} (probably an earlier attempt). Unmounting it."
         umount -R "$MNT" 2>/dev/null || umount -lR "$MNT" 2>/dev/null || true
     fi
-    if [[ -e /dev/mapper/${LUKS_NAME} ]]; then
+    if [ -e "/dev/mapper/${LUKS_NAME}" ]; then
         cryptsetup close "$LUKS_NAME" 2>/dev/null || true
     fi
     local -a devs=()
     local p
-    if [[ $PART_MODE == "auto" ]]; then
-        while read -r p; do devs+=("$p"); done < <(lsblk -lnpo NAME "$DISK" 2>/dev/null | tail -n +2)
+    if [ "$PART_MODE" = "auto" ]; then
+        while IFS= read -r p; do devs+=("$p"); done < <(lsblk -lnpo NAME "$DISK" 2>/dev/null | tail -n +2)
     else
         for p in "$ESP_PART" "$BOOT_PART" "$ROOT_PART" "$SWAP_PART"; do
-            if [[ -n $p ]]; then devs+=("$p"); fi
+            if [ -n "$p" ]; then devs+=("$p"); fi
         done
     fi
     for p in "${devs[@]}"; do
         swapoff "$p" 2>/dev/null || true
         umount "$p" 2>/dev/null || true
     done
-    if [[ $PART_MODE == "auto" ]] && have vgchange; then
+    if [ "$PART_MODE" = "auto" ] && have vgchange; then
         vgchange -an >>"$LOG" 2>&1 || true
     fi
 }
@@ -40,9 +40,33 @@ release_target() {
 # Build the sfdisk script for automatic partitioning (sets AUTO_LAYOUT and the *_PART variables).
 build_auto_layout() {
     local layout n=1
-    layout="label: gpt"$'\n'
     ESP_PART=""; BIOS_PART=""; BOOT_PART=""; SWAP_PART=""; ROOT_PART=""
-    if [[ $BOOT_MODE == "uefi" ]]; then
+    if [ "$PTABLE" = "mbr" ]; then
+        # MBR (BIOS mode only): GRUB embeds itself in the gap before the first
+        # partition, which sfdisk leaves at 1 MiB. The partition holding /boot
+        # is marked bootable (active), which some BIOSes and Macs require.
+        layout="label: dos"$'\n'
+        if [ "$NEED_BOOT_PART" = "yes" ]; then
+            layout+="size=${BOOT_SIZE_MIB}MiB, type=83, bootable"$'\n'
+            BOOT_PART=$(part_dev "$DISK" "$n")
+            n=$(( n + 1 ))
+        fi
+        if [ "$SWAP_MODE" = "partition" ]; then
+            layout+="size=${SWAP_SIZE_GIB}GiB, type=82"$'\n'
+            SWAP_PART=$(part_dev "$DISK" "$n")
+            n=$(( n + 1 ))
+        fi
+        if [ "$NEED_BOOT_PART" = "yes" ]; then
+            layout+="type=83"$'\n'
+        else
+            layout+="type=83, bootable"$'\n'
+        fi
+        ROOT_PART=$(part_dev "$DISK" "$n")
+        AUTO_LAYOUT=$layout
+        return 0
+    fi
+    layout="label: gpt"$'\n'
+    if [ "$BOOT_MODE" = "uefi" ]; then
         layout+="size=${ESP_SIZE_MIB}MiB, type=${GUID_ESP}, name=\"EFI system partition\""$'\n'
         ESP_PART=$(part_dev "$DISK" "$n")
     else
@@ -50,12 +74,12 @@ build_auto_layout() {
         BIOS_PART=$(part_dev "$DISK" "$n")
     fi
     n=$(( n + 1 ))
-    if [[ $NEED_BOOT_PART == "yes" ]]; then
+    if [ "$NEED_BOOT_PART" = "yes" ]; then
         layout+="size=${BOOT_SIZE_MIB}MiB, type=${GUID_LINUX}, name=\"Gentoo boot\""$'\n'
         BOOT_PART=$(part_dev "$DISK" "$n")
         n=$(( n + 1 ))
     fi
-    if [[ $SWAP_MODE == "partition" ]]; then
+    if [ "$SWAP_MODE" = "partition" ]; then
         layout+="size=${SWAP_SIZE_GIB}GiB, type=${GUID_SWAP}, name=\"Gentoo swap\""$'\n'
         SWAP_PART=$(part_dev "$DISK" "$n")
         n=$(( n + 1 ))
@@ -69,12 +93,12 @@ auto_partition() {
     build_auto_layout
     info "Removing old filesystem and partition table signatures from ${DISK}."
     local p
-    while read -r p; do
+    while IFS= read -r p; do
         wipefs -af "$p" >>"$LOG" 2>&1 || true
     done < <(lsblk -lnpo NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part" {print $1}')
     run wipefs -af "$DISK"
 
-    info "Writing the new GPT partition table with sfdisk:"
+    info "Writing the new ${PTABLE^^} partition table with sfdisk:"
     printf '%s' "$AUTO_LAYOUT" | sed 's/^/      /'
     printf '%s' "$AUTO_LAYOUT" | run sfdisk --wipe always --wipe-partitions always "$DISK"
     udevadm settle 2>/dev/null || true
@@ -82,9 +106,9 @@ auto_partition() {
 
     local tries
     for p in "$ESP_PART" "$BIOS_PART" "$BOOT_PART" "$SWAP_PART" "$ROOT_PART"; do
-        [[ -n $p ]] || continue
+        [ -n "$p" ] || continue
         tries=0
-        while [[ ! -b $p ]]; do
+        while [ ! -b "$p" ]; do
             tries=$(( tries + 1 ))
             if (( tries > 10 )); then die "Partition ${p} did not appear after partitioning."; fi
             partprobe "$DISK" 2>/dev/null || blockdev --rereadpt "$DISK" 2>/dev/null || true
@@ -96,23 +120,23 @@ auto_partition() {
 }
 
 format_partitions() {
-    if [[ $BOOT_MODE == "uefi" ]]; then
-        if [[ $FORMAT_ESP == "yes" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        if [ "$FORMAT_ESP" = "yes" ]; then
             info "Formatting the EFI system partition ${ESP_PART} as FAT32."
             run mkfs.vfat -F 32 -n EFI "$ESP_PART"
         else
             info "Keeping the existing EFI system partition ${ESP_PART} as it is."
         fi
     fi
-    if [[ -n $BOOT_PART ]]; then
+    if [ -n "$BOOT_PART" ]; then
         info "Formatting ${BOOT_PART} as ext4 for /boot."
         run mkfs.ext4 -F -L gentoo-boot "$BOOT_PART"
     fi
-    if [[ -n $SWAP_PART ]]; then
+    if [ -n "$SWAP_PART" ]; then
         info "Formatting ${SWAP_PART} as swap."
         run mkswap -L gentoo-swap "$SWAP_PART"
     fi
-    if [[ $ENCRYPT == "yes" ]]; then
+    if [ "$ENCRYPT" = "yes" ]; then
         info "Encrypting ${ROOT_PART} with LUKS2. The key derivation is slow on purpose (it makes guessing expensive), so this takes a few seconds."
         printf '%s' "$LUKS_PASSWORD" | run cryptsetup luksFormat --type luks2 --batch-mode --key-file=- "$ROOT_PART"
         printf '%s' "$LUKS_PASSWORD" | run cryptsetup open --key-file=- "$ROOT_PART" "$LUKS_NAME"
@@ -127,7 +151,7 @@ format_partitions() {
         xfs) run mkfs.xfs -f -L gentoo "$dev" ;;
         btrfs)
             run mkfs.btrfs -f -L gentoo "$dev"
-            mkdir -p "$MNT"
+            mkdir -p -- "$MNT"
             run mount "$dev" "$MNT"
             run btrfs subvolume create "$MNT/@"
             run btrfs subvolume create "$MNT/@home"
@@ -138,8 +162,8 @@ format_partitions() {
 
 # Mount the target filesystems (safe to call more than once).
 mount_target() {
-    mkdir -p "$MNT"
-    if [[ $ENCRYPT == "yes" && ! -e /dev/mapper/${LUKS_NAME} ]]; then
+    mkdir -p -- "$MNT"
+    if [ "$ENCRYPT" = "yes" ] && [ ! -e "/dev/mapper/${LUKS_NAME}" ]; then
         info "Unlocking the encrypted root partition ${ROOT_PART}."
         handoff_screen
         cryptsetup open "$ROOT_PART" "$LUKS_NAME"
@@ -147,25 +171,25 @@ mount_target() {
     local dev
     dev=$(root_fs_dev)
     if ! mountpoint -q "$MNT"; then
-        if [[ $FS == "btrfs" ]]; then
+        if [ "$FS" = "btrfs" ]; then
             run mount -o "${BTRFS_OPTS},subvol=@" "$dev" "$MNT"
         else
             run mount -o noatime "$dev" "$MNT"
         fi
     fi
-    if [[ $FS == "btrfs" ]]; then
-        mkdir -p "$MNT/home"
+    if [ "$FS" = "btrfs" ]; then
+        mkdir -p -- "$MNT/home"
         if ! mountpoint -q "$MNT/home"; then run mount -o "${BTRFS_OPTS},subvol=@home" "$dev" "$MNT/home"; fi
     fi
-    if [[ -n $BOOT_PART ]]; then
-        mkdir -p "$MNT/boot"
+    if [ -n "$BOOT_PART" ]; then
+        mkdir -p -- "$MNT/boot"
         if ! mountpoint -q "$MNT/boot"; then run mount -o noatime "$BOOT_PART" "$MNT/boot"; fi
     fi
-    if [[ $BOOT_MODE == "uefi" ]]; then
-        mkdir -p "$MNT/efi"
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        mkdir -p -- "$MNT/efi"
         if ! mountpoint -q "$MNT/efi"; then run mount -o umask=0077 "$ESP_PART" "$MNT/efi"; fi
     fi
-    if [[ -n $SWAP_PART ]] && ! grep -q "^${SWAP_PART} " /proc/swaps; then
+    if [ -n "$SWAP_PART" ] && ! grep -q "^${SWAP_PART} " /proc/swaps; then
         swapon "$SWAP_PART" 2>/dev/null || true
     fi
 }
@@ -173,7 +197,7 @@ mount_target() {
 prepare_disk() {
     section "Preparing the disk"
     release_target
-    if [[ $PART_MODE == "auto" ]]; then
+    if [ "$PART_MODE" = "auto" ]; then
         auto_partition
     fi
     format_partitions
@@ -187,10 +211,11 @@ prepare_disk() {
 # ----------------------------------------------------------------------------
 verify_stage3() {
     local f=$1 sig_ok="no" status gh
-    if [[ -s ${f}.asc ]] && have gpg; then
-        gh=$(mktemp -d)
-        chmod 700 "$gh"
-        if [[ -r /usr/share/openpgp-keys/gentoo-release.asc ]]; then
+    if [ -s "${f}.asc" ] && have gpg; then
+        make_work_dir
+        gh=$(mktemp -d "${WORK_DIR}/gnupg.XXXXXX")
+        chmod 700 -- "$gh"
+        if [ -r /usr/share/openpgp-keys/gentoo-release.asc ]; then
             GNUPGHOME=$gh gpg --batch --quiet --import /usr/share/openpgp-keys/gentoo-release.asc >>"$LOG" 2>&1 || true
         fi
         status=$(GNUPGHOME=$gh gpg --batch --status-fd 1 --verify "${f}.asc" "$f" 2>>"$LOG" || true)
@@ -199,7 +224,7 @@ verify_stage3() {
             GNUPGHOME=$gh gpg --batch --auto-key-locate=clear,nodefault,wkd --locate-key releng@gentoo.org >>"$LOG" 2>&1 || true
             status=$(GNUPGHOME=$gh gpg --batch --status-fd 1 --verify "${f}.asc" "$f" 2>>"$LOG" || true)
         fi
-        rm -rf "$gh"
+        rm -rf -- "$gh"
         if grep -q '^\[GNUPG:\] BADSIG' <<<"$status"; then
             die "The PGP signature of ${f} is BAD. The file is corrupted or has been tampered with. Aborting."
         fi
@@ -209,14 +234,14 @@ verify_stage3() {
         fi
     fi
 
-    if [[ -s ${f}.sha256 ]]; then
+    if [ -s "${f}.sha256" ]; then
         local expected actual
         # "<64 hex digits>  <file name>" lines, possibly inside a PGP clearsigned block.
         expected=$(tr -d '\r' <"${f}.sha256" | awk -v f="$f" '
             !found && length($1) == 64 && $1 ~ /^[0-9a-fA-F]+$/ && ($2 == f || $2 == "*" f) { print tolower($1); found = 1 }')
-        if [[ -n $expected ]]; then
+        if [ -n "$expected" ]; then
             actual=$(sha256sum "$f" | awk '{print $1}')
-            if [[ $expected != "$actual" ]]; then
+            if [ "$expected" != "$actual" ]; then
                 die "SHA256 checksum mismatch for ${f}. The download is corrupted. Run the installer again."
             fi
             ok "SHA256 checksum matches."
@@ -225,7 +250,7 @@ verify_stage3() {
         fi
     fi
 
-    if [[ $sig_ok != "yes" ]]; then
+    if [ "$sig_ok" != "yes" ]; then
         warn "The PGP signature could not be checked (gpg or the Gentoo signing key is unavailable)."
         say "The file was downloaded over HTTPS from Gentoo's servers, which protects it in transit, but a signature check is the stronger guarantee."
         if ! yesno "Continue without a verified signature?" y; then
@@ -249,11 +274,11 @@ resolve_stage3() {
         || die "Could not download ${index}. Check the network connection and try again. Nothing on disk has been changed."
     rel=$(printf '%s\n' "$listing" | tr -d '\r' | awk -v v="stage3-amd64-${STAGE3_VARIANT}-" '
         !found && $1 !~ /^#/ && $1 ~ /\.tar\.xz$/ && index($1, v) { print $1; found = 1 }')
-    if [[ -z $rel ]]; then
+    if [ -z "$rel" ]; then
         log "Stage3 index content: ${listing}"
         die "Could not find a stage3-amd64-${STAGE3_VARIANT} file name in ${index} (its content is in the log). Nothing on disk has been changed."
     fi
-    if [[ $rel == */* ]]; then
+    if [[ $rel = */* ]]; then
         STAGE3_URL="${base}/${rel}"
     else
         STAGE3_URL="${base}/current-stage3-amd64-${STAGE3_VARIANT}/${rel}"
@@ -265,17 +290,17 @@ resolve_stage3() {
 install_stage3() {
     section "Downloading and verifying the Gentoo stage3"
     say "A stage3 is a small but complete Gentoo base system (compiler, Portage, core tools) that everything else is built on. The installer downloads the newest stage3-amd64-${STAGE3_VARIANT}, checks its PGP signature from Gentoo Release Engineering and its SHA256 checksum, then unpacks it onto your new root filesystem."
-    if [[ -z $STAGE3_URL ]]; then resolve_stage3; fi
+    if [ -z "$STAGE3_URL" ]; then resolve_stage3; fi
     local url=$STAGE3_URL file=$STAGE3_FILE
-    cd "$MNT"
+    cd -- "$MNT" || die "Could not change into ${MNT}."
     fetch "$url" "$file"
     fetch "${url}.asc" "${file}.asc" || warn "Could not download the PGP signature file."
     fetch "${url}.sha256" "${file}.sha256" || warn "Could not download the SHA256 checksum file."
     verify_stage3 "$file"
     info "Unpacking the stage3 into ${MNT}. This takes a minute or two and prints nothing while it works."
     run tar xpf "$file" --xattrs-include='*.*' --numeric-owner -C "$MNT"
-    rm -f "$file" "${file}.asc" "${file}.sha256"
-    cd /
+    rm -f -- "$file" "${file}.asc" "${file}.sha256"
+    cd / || exit 1
     ok "Stage3 unpacked."
 }
 
@@ -294,7 +319,7 @@ mount_pseudo() {
         run mount --bind /run "$MNT/run"
         run mount --make-slave "$MNT/run"
     fi
-    cp --dereference /etc/resolv.conf "$MNT/etc/resolv.conf"
+    cp -L -- /etc/resolv.conf "$MNT/etc/resolv.conf"
 }
 
 hash_one_password() {
@@ -327,16 +352,16 @@ profile_version() {
 compute_cmdline() {
     local root_uuid luks_uuid extra=""
     root_uuid=$(blk_uuid "$(root_fs_dev)")
-    [[ -n $root_uuid ]] || die "Could not read the UUID of the root filesystem."
+    [ -n "$root_uuid" ] || die "Could not read the UUID of the root filesystem."
     KERNEL_CMDLINE="root=UUID=${root_uuid}"
-    if [[ $FS == "btrfs" ]]; then KERNEL_CMDLINE+=" rootflags=subvol=@"; fi
-    if [[ $ENCRYPT == "yes" ]]; then
+    if [ "$FS" = "btrfs" ]; then KERNEL_CMDLINE+=" rootflags=subvol=@"; fi
+    if [ "$ENCRYPT" = "yes" ]; then
         luks_uuid=$(blk_uuid "$ROOT_PART")
-        [[ -n $luks_uuid ]] || die "Could not read the UUID of the LUKS container."
+        [ -n "$luks_uuid" ] || die "Could not read the UUID of the LUKS container."
         KERNEL_CMDLINE="rd.luks.uuid=${luks_uuid} ${KERNEL_CMDLINE}"
         extra+=" rd.luks.uuid=${luks_uuid}"
     fi
-    if [[ $GPU_DRIVER == "nvidia" ]]; then
+    if [ "$GPU_DRIVER" = "nvidia" ]; then
         KERNEL_CMDLINE+=" nvidia_drm.modeset=1"
         extra+=" nvidia_drm.modeset=1"
     fi
@@ -345,31 +370,33 @@ compute_cmdline() {
 
 write_make_conf() {
     local f="$MNT/etc/portage/make.conf"
-    if [[ -f $f && ! -f $f.stage3-original ]]; then cp "$f" "$f.stage3-original"; fi
+    if [ -f "$f" ] && [ ! -f "$f.stage3-original" ]; then cp -- "$f" "$f.stage3-original"; fi
 
     local extra=""
-    if [[ $BOOTLOADER == "grub" && $BOOT_MODE == "uefi" ]]; then
+    if [ "$BOOTLOADER" = "grub" ] && [ "$BOOT_MODE" = "uefi" ] && [ "$UEFI_BITS" = "32" ]; then
+        extra+=$'\n# GRUB firmware target for this machine (32-bit UEFI with a 64-bit CPU).\nGRUB_PLATFORMS="efi-32"\n'
+    elif [ "$BOOTLOADER" = "grub" ] && [ "$BOOT_MODE" = "uefi" ]; then
         extra+=$'\n# GRUB firmware target for this machine.\nGRUB_PLATFORMS="efi-64"\n'
-    elif [[ $BOOTLOADER == "grub" ]]; then
+    elif [ "$BOOTLOADER" = "grub" ]; then
         extra+=$'\n# GRUB firmware target for this machine.\nGRUB_PLATFORMS="pc"\n'
     fi
-    if [[ $USE_BINPKG == "yes" ]]; then
-        extra+=$'\n# Use Gentoo\'s official binary packages when they match this configuration,\n# and require a valid PGP signature on each of them.\n# Remove this line to build everything from source.\nFEATURES="${FEATURES} getbinpkg binpkg-request-signature"\n'
+    if [ "$USE_BINPKG" = "yes" ]; then
+        extra+=$'\n# Use Gentoo\'s official binary packages when they match this configuration,\n# and require a valid PGP signature on each of them (current Portage checks\n# signatures by default; this keeps it explicit).\n# Remove this line to build everything from source.\nFEATURES="${FEATURES} getbinpkg binpkg-request-signature"\n'
     fi
-    if [[ -n $GENTOO_MIRRORS_VALUE ]]; then
+    if [ -n "$GENTOO_MIRRORS_VALUE" ]; then
         extra+=$'\n# Mirrors chosen with mirrorselect.\nGENTOO_MIRRORS="'"${GENTOO_MIRRORS_VALUE}"$'"\n'
     fi
     local lang region
     lang=${LOCALE%%_*}
     region=${LOCALE#*_}
     region=${region%%.*}
-    if [[ ! ( $lang == "en" && $region == "US" ) ]]; then
+    if [ "$lang" != "en" ] || [ "$region" != "US" ]; then
         extra+=$'\n# Translations to install for packages that offer them (for example LibreOffice, Firefox).\nL10N="'"${lang}-${region} ${lang}"$'"\n'
     fi
 
     cat >"$f" <<EOF
 # /etc/portage/make.conf
-# Written by gentoo-install.sh ${SCRIPT_VERSION} on $(date -u '+%Y-%m-%d %H:%M UTC').
+# Written by gentoo_install.sh ${SCRIPT_VERSION} on $(date -u '+%Y-%m-%d %H:%M UTC').
 # The stage3's original version is saved next to this file as make.conf.stage3-original.
 # Reference: man make.conf, https://wiki.gentoo.org/wiki//etc/portage/make.conf
 
@@ -431,83 +458,98 @@ EOF
 }
 
 write_binrepos() {
-    [[ $USE_BINPKG == "yes" ]] || return 0
+    [ "$USE_BINPKG" = "yes" ] || return 0
     local ver dir f
     ver=$(profile_version)
-    if [[ -z $ver ]]; then
+    if [ -z "$ver" ]; then
         warn "Could not determine the profile version from the stage3; assuming 23.0."
         ver="23.0"
     fi
     dir="$MNT/etc/portage/binrepos.conf"
     f="$dir/gentoobinhost.conf"
-    mkdir -p "$dir"
-    if [[ -f $f && ! -f $dir/gentoobinhost.conf.stage3-original ]]; then
-        cp "$f" "$dir/gentoobinhost.conf.stage3-original"
+    mkdir -p -- "$dir"
+    if [ -f "$f" ] && [ ! -f "$dir/gentoobinhost.conf.stage3-original" ]; then
+        cp -- "$f" "$dir/gentoobinhost.conf.stage3-original"
     fi
     {
-        echo "# Gentoo's official binary package host."
-        echo "# Written by gentoo-install.sh. The higher priority repository is tried first."
-        if [[ $BINHOST_V3 == "yes" ]]; then
-            echo ""
-            echo "# Packages built for x86-64-v3 CPUs (AVX2 generation and newer)."
-            echo "[gentoo-x86-64-v3]"
-            echo "priority = 9999"
-            echo "sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/${ver}/x86-64-v3/"
-            echo "verify-signature = true"
+        printf '%s\n' "# Gentoo's official binary package host."
+        printf '%s\n' "# Written by gentoo_install.sh. The higher priority repository is tried first."
+        if [ "$BINHOST_V3" = "yes" ]; then
+            printf '%s\n' ""
+            printf '%s\n' "# Packages built for x86-64-v3 CPUs (AVX2 generation and newer)."
+            printf '%s\n' "[gentoo-x86-64-v3]"
+            printf '%s\n' "priority = 9999"
+            printf '%s\n' "sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/${ver}/x86-64-v3/"
+            printf '%s\n' "verify-signature = true"
         fi
-        echo ""
-        echo "# Packages built for any x86-64 CPU."
-        echo "[gentoo]"
-        echo "priority = 9959"
-        echo "sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/${ver}/x86-64/"
-        echo "verify-signature = true"
+        printf '%s\n' ""
+        printf '%s\n' "# Packages built for any x86-64 CPU."
+        printf '%s\n' "[gentoo]"
+        printf '%s\n' "priority = 9959"
+        printf '%s\n' "sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/${ver}/x86-64/"
+        printf '%s\n' "verify-signature = true"
     } >"$f"
     ok "Wrote /etc/portage/binrepos.conf/gentoobinhost.conf"
 }
 
 write_package_files() {
     local pu="$MNT/etc/portage/package.use" pl="$MNT/etc/portage/package.license"
-    mkdir -p "$pu" "$pl"
+    mkdir -p -- "$pu" "$pl"
 
     {
-        echo "# Written by gentoo-install.sh"
-        echo "# installkernel installs new kernels, builds the initramfs with dracut and"
-        echo "# updates the bootloader automatically every time a kernel is emerged."
-        if [[ $BOOTLOADER == "grub" ]]; then
-            echo "sys-kernel/installkernel dracut grub"
+        printf '%s\n' "# Written by gentoo_install.sh"
+        printf '%s\n' "# installkernel installs new kernels, builds the initramfs with dracut and"
+        printf '%s\n' "# updates the bootloader automatically every time a kernel is emerged."
+        if [ "$BOOTLOADER" = "grub" ]; then
+            printf '%s\n' "sys-kernel/installkernel dracut grub"
         else
-            echo "sys-kernel/installkernel dracut systemd systemd-boot"
-            if [[ $INIT == "openrc" ]]; then
-                echo "# systemd-boot and kernel-install on OpenRC come from systemd-utils."
-                echo "sys-apps/systemd-utils boot kernel-install"
+            printf '%s\n' "sys-kernel/installkernel dracut systemd systemd-boot"
+            if [ "$INIT" = "openrc" ]; then
+                printf '%s\n' "# systemd-boot and kernel-install on OpenRC come from systemd-utils."
+                printf '%s\n' "sys-apps/systemd-utils boot kernel-install"
             else
-                echo "sys-apps/systemd boot"
+                printf '%s\n' "sys-apps/systemd boot"
             fi
         fi
     } >"$pu/installkernel"
 
-    if [[ $ENCRYPT == "yes" && $INIT == "systemd" ]]; then
-        printf '%s\n' "# Written by gentoo-install.sh: unlock LUKS in the systemd initramfs." \
+    if [ "$ENCRYPT" = "yes" ] && [ "$INIT" = "systemd" ]; then
+        printf '%s\n' "# Written by gentoo_install.sh: unlock LUKS in the systemd initramfs." \
             "sys-apps/systemd cryptsetup" >"$pu/luks"
     fi
-    if [[ $WANT_FLATPAK == "yes" ]]; then
-        printf '%s\n' "# Written by gentoo-install.sh: show Flathub apps in the desktop software centres." \
+    if [ "$WANT_FLATPAK" = "yes" ]; then
+        printf '%s\n' "# Written by gentoo_install.sh: show Flathub apps in the desktop software centres." \
             "kde-plasma/discover flatpak" \
             "gnome-extra/gnome-software flatpak" >"$pu/flatpak"
     fi
 
     {
-        echo "# Written by gentoo-install.sh: licenses accepted for specific packages."
-        echo "sys-kernel/linux-firmware linux-fw-redistributable"
-        echo "sys-firmware/intel-microcode intel-ucode"
-        if [[ $GPU_DRIVER == "nvidia" ]]; then echo "x11-drivers/nvidia-drivers NVIDIA-2025"; fi
-        if [[ " $EXTRA_PKGS " == *" www-client/google-chrome "* ]]; then echo "www-client/google-chrome google-chrome"; fi
+        printf '%s\n' "# Written by gentoo_install.sh: licenses accepted for specific packages."
+        printf '%s\n' "sys-kernel/linux-firmware linux-fw-redistributable"
+        printf '%s\n' "sys-firmware/intel-microcode intel-ucode"
+        if [ "$GPU_DRIVER" = "nvidia" ]; then printf '%s\n' "x11-drivers/nvidia-drivers NVIDIA-2025"; fi
+        if [[ " $EXTRA_PKGS " = *" www-client/google-chrome "* ]]; then printf '%s\n' "www-client/google-chrome google-chrome"; fi
+        if [ "$WANT_BCM_WL" = "yes" ]; then printf '%s\n' "net-wireless/broadcom-sta Broadcom"; fi
+        if [ "$BCM_WIFI" = "b43" ] && [ "$VIRT" = "none" ]; then printf '%s\n' "sys-firmware/b43-firmware Broadcom"; fi
     } >"$pl/gentoo-install"
 
-    if [[ $GPU_DRIVER == "nvidia" && $NVIDIA_GEN == "legacy580" ]]; then
+    # Testing (~amd64) versions accepted for single packages that have no
+    # stable version, only when the hardware needs them and the user agreed.
+    local -a kw=()
+    if [ "$WANT_BCM_WL" = "yes" ]; then kw+=("net-wireless/broadcom-sta ~amd64"); fi
+    if [ "$WANT_MBPFAN" = "yes" ]; then kw+=("app-laptop/mbpfan ~amd64"); fi
+    if [ "${#kw[@]}" -gt 0 ]; then
+        local pk="$MNT/etc/portage/package.accept_keywords"
+        if [ ! -f "$pk" ]; then mkdir -p -- "$pk"; pk+="/gentoo-install"; fi
+        printf '%s\n' "# Written by gentoo_install.sh: testing versions allowed for hardware support." \
+            "${kw[@]}" >>"$pk"
+        ok "Allowed testing versions: ${kw[*]}"
+    fi
+
+    if [ "$GPU_DRIVER" = "nvidia" ] && [ "$NVIDIA_GEN" = "legacy580" ]; then
         local pm="$MNT/etc/portage/package.mask"
-        if [[ ! -f $pm ]]; then mkdir -p "$pm"; pm+="/gentoo-install"; fi
-        printf '%s\n' "# Written by gentoo-install.sh: this computer's NVIDIA card (Maxwell, Pascal" \
+        if [ ! -f "$pm" ]; then mkdir -p -- "$pm"; pm+="/gentoo-install"; fi
+        printf '%s\n' "# Written by gentoo_install.sh: this computer's NVIDIA card (Maxwell, Pascal" \
             "# or Volta) is supported up to the 580 driver branch. Newer branches only" \
             "# support Turing (GeForce GTX 16xx / RTX 20xx) and newer cards." \
             ">=x11-drivers/nvidia-drivers-581" >>"$pm"
@@ -519,27 +561,27 @@ write_package_files() {
 write_fstab() {
     local root_uuid f="$MNT/etc/fstab"
     root_uuid=$(blk_uuid "$(root_fs_dev)")
-    [[ -n $root_uuid ]] || die "Could not read the UUID of the root filesystem."
+    [ -n "$root_uuid" ] || die "Could not read the UUID of the root filesystem."
     {
-        echo "# /etc/fstab: filesystems mounted at boot. Written by gentoo-install.sh."
-        echo "# Devices are referenced by UUID so the entries survive disk renumbering."
-        echo "# <filesystem>                             <mountpoint> <type> <options>                       <dump> <pass>"
+        printf '%s\n' "# /etc/fstab: filesystems mounted at boot. Written by gentoo_install.sh."
+        printf '%s\n' "# Devices are referenced by UUID so the entries survive disk renumbering."
+        printf '%s\n' "# <filesystem>                             <mountpoint> <type> <options>                       <dump> <pass>"
         case "$FS" in
-            ext4) echo "UUID=${root_uuid}  /      ext4   noatime                          0 1" ;;
-            xfs) echo "UUID=${root_uuid}  /      xfs    noatime                          0 0" ;;
+            ext4) printf '%s\n' "UUID=${root_uuid}  /      ext4   noatime                          0 1" ;;
+            xfs) printf '%s\n' "UUID=${root_uuid}  /      xfs    noatime                          0 0" ;;
             btrfs)
-                echo "UUID=${root_uuid}  /      btrfs  ${BTRFS_OPTS},subvol=@      0 0"
-                echo "UUID=${root_uuid}  /home  btrfs  ${BTRFS_OPTS},subvol=@home  0 0"
+                printf '%s\n' "UUID=${root_uuid}  /      btrfs  ${BTRFS_OPTS},subvol=@      0 0"
+                printf '%s\n' "UUID=${root_uuid}  /home  btrfs  ${BTRFS_OPTS},subvol=@home  0 0"
                 ;;
         esac
-        if [[ -n $BOOT_PART ]]; then
-            echo "UUID=$(blk_uuid "$BOOT_PART")  /boot  ext4   noatime                          0 2"
+        if [ -n "$BOOT_PART" ]; then
+            printf '%s\n' "UUID=$(blk_uuid "$BOOT_PART")  /boot  ext4   noatime                          0 2"
         fi
-        if [[ $BOOT_MODE == "uefi" ]]; then
-            echo "UUID=$(blk_uuid "$ESP_PART")  /efi   vfat   umask=0077,noatime               0 2"
+        if [ "$BOOT_MODE" = "uefi" ]; then
+            printf '%s\n' "UUID=$(blk_uuid "$ESP_PART")  /efi   vfat   umask=0077,noatime               0 2"
         fi
-        if [[ -n $SWAP_PART ]]; then
-            echo "UUID=$(blk_uuid "$SWAP_PART")  none   swap   sw                               0 0"
+        if [ -n "$SWAP_PART" ]; then
+            printf '%s\n' "UUID=$(blk_uuid "$SWAP_PART")  none   swap   sw                               0 0"
         fi
     } >"$f"
     ok "Wrote /etc/fstab"
@@ -547,20 +589,21 @@ write_fstab() {
 }
 
 write_kernel_config() {
-    mkdir -p "$MNT/etc/kernel" "$MNT/etc/dracut.conf.d"
+    mkdir -p -- "$MNT/etc/kernel" "$MNT/etc/dracut.conf.d"
     printf '%s\n' "$KERNEL_CMDLINE" >"$MNT/etc/kernel/cmdline"
     {
-        echo "# Written by gentoo-install.sh"
-        echo "# Host-only initramfs: contains just the drivers this machine needs (smaller"
-        echo "# and faster). If you move this disk to different hardware, set hostonly=\"no\""
-        echo "# and run: emerge --config sys-kernel/${KERNEL_PKG}"
-        echo 'hostonly="yes"'
-        echo "# Kernel command line built into the initramfs. installkernel requires it when"
-        echo "# run inside a chroot, and it keeps the system bootable if the bootloader"
-        echo "# configuration is ever lost."
-        echo "kernel_cmdline=\" ${KERNEL_CMDLINE} \""
-        if [[ $ENCRYPT == "yes" ]]; then echo 'add_dracutmodules+=" crypt dm "'; fi
-        if [[ $FS == "btrfs" ]]; then echo 'add_dracutmodules+=" btrfs "'; fi
+        printf '%s\n' "# Written by gentoo_install.sh"
+        printf '%s\n' "# Host-only initramfs: contains just the drivers this machine needs (smaller"
+        printf '%s\n' "# and faster). If you move this disk to different hardware, set hostonly=\"no\""
+        printf '%s\n' "# and run: emerge --config sys-kernel/${KERNEL_PKG}"
+        printf '%s\n' 'hostonly="yes"'
+        printf '%s\n' "# Kernel command line built into the initramfs. The bootloader passes the same"
+        printf '%s\n' "# parameters (GRUB_CMDLINE_LINUX or /etc/kernel/cmdline); this copy keeps the"
+        printf '%s\n' "# system bootable if the bootloader configuration is ever lost. Dracut 111 and"
+        printf '%s\n' "# newer no longer guess it (hostonly_cmdline), so it is set explicitly."
+        printf '%s\n' "kernel_cmdline=\" ${KERNEL_CMDLINE} \""
+        if [ "$ENCRYPT" = "yes" ]; then printf '%s\n' 'add_dracutmodules+=" crypt dm "'; fi
+        if [ "$FS" = "btrfs" ]; then printf '%s\n' 'add_dracutmodules+=" btrfs "'; fi
     } >"$MNT/etc/dracut.conf.d/10-gentoo-install.conf"
     ok "Wrote /etc/kernel/cmdline and /etc/dracut.conf.d/10-gentoo-install.conf"
     info "Kernel command line: ${KERNEL_CMDLINE}"
@@ -569,18 +612,18 @@ write_kernel_config() {
 save_config() {
     local f=$1 v
     {
-        echo "# gentoo-install.sh ${SCRIPT_VERSION} settings, written $(date -u '+%Y-%m-%d %H:%M UTC')."
-        echo "# Used by --resume and by the second (chroot) stage."
+        printf '%s\n' "# gentoo_install.sh ${SCRIPT_VERSION} settings, written $(date -u '+%Y-%m-%d %H:%M UTC')."
+        printf '%s\n' "# Used by --resume and by the second (chroot) stage."
         for v in "${CONFIG_VARS[@]}"; do
             declare -p "$v" | sed 's/^declare /declare -g /'
         done
     } >"$f"
-    chmod 600 "$f"
+    chmod 600 -- "$f"
 }
 
 load_config() {
     # shellcheck disable=SC1090
-    source "$1"
+    . "$1"
 }
 
 write_target_config() {
@@ -593,9 +636,9 @@ write_target_config() {
     write_kernel_config
     save_config "${MNT}${CONF_PATH}"
     save_config "$LIVE_CONF_COPY"
-    install -m 700 "$SELF" "${MNT}${SCRIPT_PATH}"
+    install -m 700 -- "$SELF" "${MNT}${SCRIPT_PATH}"
     : >"${MNT}${PROGRESS_PATH}"
-    echo "live_setup" >>"${MNT}${PROGRESS_PATH}"
+    printf '%s\n' "live_setup" >>"${MNT}${PROGRESS_PATH}"
     ok "The new system is prepared for the chroot stage."
 }
 
@@ -607,7 +650,7 @@ run_chroot_stage() {
     say "From here on the installer runs inside your new Gentoo system (a 'chroot'), exactly like the Handbook's chapter on installing the base system. This is the long part. You can walk away: no more questions are asked." \
         "Output is shown on screen and saved to ${MNT}${TARGET_LOG}."
     if ! chroot "$MNT" /usr/bin/env -i HOME=/root TERM="${TERM:-linux}" /bin/bash "$SCRIPT_PATH" --chroot-stage; then
-        echo
+        printf '\n'
         err "The installation stopped inside the new system."
         err "Log: ${MNT}${TARGET_LOG}"
         print_resume_help
@@ -617,33 +660,38 @@ run_chroot_stage() {
 
 unmount_all() {
     sync
-    if [[ -n $SWAP_PART ]]; then swapoff "$SWAP_PART" 2>/dev/null || true; fi
+    if [ -n "$SWAP_PART" ]; then swapoff "$SWAP_PART" 2>/dev/null || true; fi
     umount -R "$MNT" 2>/dev/null || umount -lR "$MNT" 2>/dev/null || true
-    if [[ $ENCRYPT == "yes" && -e /dev/mapper/${LUKS_NAME} ]]; then
+    if [ "$ENCRYPT" = "yes" ] && [ -e "/dev/mapper/${LUKS_NAME}" ]; then
         cryptsetup close "$LUKS_NAME" 2>/dev/null || true
     fi
 }
 
 finish_install() {
-    cp "$LIVE_LOG" "$MNT/var/log/gentoo-install-live.log" 2>/dev/null || true
-    if [[ $NET_TOOL == "networkd" ]]; then
+    cp -- "$LIVE_LOG" "$MNT/var/log/gentoo-install-live.log" 2>/dev/null || true
+    if [ "$NET_TOOL" = "networkd" ]; then
         ln -sf ../run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"
     fi
-    rm -f "$LIVE_CONF_COPY"
+    rm -f -- "$LIVE_CONF_COPY"
 
     section "Installation complete"
     say "Gentoo is installed. After rebooting, log in as '${USERNAME}'." \
-        "To install software or update the system, open a terminal and run: gentoo-helper" \
+        "To install software or update the system, open a terminal and run: gentoo_helper" \
         "A guide with the next steps (updating, reading Gentoo news, managing kernels) was saved as ~/${NOTES_NAME} in your home directory and in /root. Installation logs are in /var/log/gentoo-install.log and /var/log/gentoo-install-live.log."
-    if [[ -s "$MNT$FAILED_PATH" ]]; then
+    if [ -s "$MNT$FAILED_PATH" ]; then
         warn "These optional packages could not be installed: $(tr '\n' ' ' <"$MNT$FAILED_PATH")"
         say "The system works without them. Try again after booting with: emerge --ask <package>"
     fi
-    if [[ $SECURE_BOOT == "on" ]]; then
+    if [ "$SECURE_BOOT" = "on" ]; then
         warn "Secure Boot is still enabled. Disable it in the firmware setup, or Gentoo will not boot."
     fi
-    if [[ $IS_APPLE == "yes" && $BOOT_MODE == "uefi" ]]; then
+    if [ "$IS_APPLE" = "yes" ] && [ "$BOOT_MODE" = "uefi" ]; then
         say "On this Mac: if it shows a flashing folder with a question mark after the restart, hold the Option key while it starts and choose 'EFI Boot'."
+    elif [ "$IS_APPLE" = "yes" ]; then
+        say "On this Mac: if it does not start Gentoo by itself, hold the Option key while it starts and choose 'Windows' (that is how Macs label any legacy BIOS system)."
+    fi
+    if [ "$BCM_WIFI" = "wl" ] && [ "$WANT_BCM_WL" = "yes" ]; then
+        say "Broadcom Wi-Fi: the wl driver loads after the reboot. If Wi-Fi does not show up, check the end of the install log for a failed net-wireless/broadcom-sta build."
     fi
     if yesno "Unmount the new system now?" y; then
         unmount_all
@@ -659,32 +707,32 @@ finish_install() {
 resume_install() {
     section "Resuming a previous installation"
     local conf="" dev ptype
-    if [[ -f ${MNT}${CONF_PATH} ]]; then
+    if [ -f "${MNT}${CONF_PATH}" ]; then
         conf="${MNT}${CONF_PATH}"
-    elif [[ -f $LIVE_CONF_COPY ]]; then
+    elif [ -f "$LIVE_CONF_COPY" ]; then
         conf="$LIVE_CONF_COPY"
     fi
-    if [[ -z $conf ]]; then
+    if [ -z "$conf" ]; then
         say "The new system is not mounted. Choose its root partition so the installer can find its saved settings."
         pick_partition ROOT_PART "Which partition is the root partition of the new Gentoo system?" ""
         ptype=$(blkid -c /dev/null -s TYPE -o value "$ROOT_PART" 2>/dev/null || true)
         dev=$ROOT_PART
-        if [[ $ptype == "crypto_LUKS" ]]; then
-            if [[ ! -e /dev/mapper/${LUKS_NAME} ]]; then
+        if [ "$ptype" = "crypto_LUKS" ]; then
+            if [ ! -e "/dev/mapper/${LUKS_NAME}" ]; then
                 info "The partition is encrypted. Enter its passphrase."
                 handoff_screen
                 cryptsetup open "$ROOT_PART" "$LUKS_NAME"
             fi
             dev="/dev/mapper/${LUKS_NAME}"
         fi
-        mkdir -p "$MNT"
-        if [[ $(blkid -c /dev/null -s TYPE -o value "$dev" 2>/dev/null || true) == "btrfs" ]]; then
+        mkdir -p -- "$MNT"
+        if [ "$(blkid -c /dev/null -s TYPE -o value "$dev" 2>/dev/null || true)" = "btrfs" ]; then
             mount -o "${BTRFS_OPTS},subvol=@" "$dev" "$MNT"
         else
             mount "$dev" "$MNT"
         fi
         conf="${MNT}${CONF_PATH}"
-        if [[ ! -f $conf ]]; then
+        if [ ! -f "$conf" ]; then
             umount "$MNT" || true
             die "No saved installer settings were found on ${ROOT_PART}. Either it is the wrong partition, or the installation stopped before the new system was prepared; in that case start over with: bash ${SELF}"
         fi
@@ -695,7 +743,7 @@ resume_install() {
         die "The installation stopped before the new system was fully prepared. Please start over with: bash ${SELF}"
     fi
     mount_pseudo
-    install -m 700 "$SELF" "${MNT}${SCRIPT_PATH}"
+    install -m 700 -- "$SELF" "${MNT}${SCRIPT_PATH}"
     ok "Settings loaded. Continuing with the steps that have not finished yet."
     ui_install_phase
     run_chroot_stage
@@ -706,13 +754,13 @@ resume_install() {
 fresh_install() {
     live_preflight
     : >"$LOG"
-    log "gentoo-install.sh ${SCRIPT_VERSION} started"
+    log "gentoo_install.sh ${SCRIPT_VERSION} started"
     init_defaults
     welcome
     live_keyboard
+    detect_hardware
     network_step
     sync_clock
-    detect_hardware
     show_hardware
     mac_boot_check
     while true; do

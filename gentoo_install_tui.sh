@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  gentoo-install.sh / gentoo-install-tui.sh - guided Gentoo Linux installer for amd64
+#  gentoo_install.sh / gentoo_install_tui.sh: guided Gentoo Linux installer for amd64
 # =============================================================================
 #
 #  What it does
@@ -19,27 +19,30 @@
 #  How to run (from the official Gentoo live image, as root)
 #  ---------------------------------------------------------
 #    Menu version:
-#      curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install-tui.sh
-#      bash gentoo-install-tui.sh
+#      curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo_install_tui.sh
+#      bash gentoo_install_tui.sh
 #    Console version:
-#      curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh
-#      bash gentoo-install.sh
+#      curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo_install.sh
+#      bash gentoo_install.sh
 #
 #  Do not pipe it into bash (curl ... | bash). The script is interactive and
 #  reads your answers from the keyboard.
 #
 #  Options
-#    --resume   Continue an installation that stopped because of an error
-#    --help     Show help
+#    -r, --resume   Continue an installation that stopped because of an error
+#    -h, --help     Show help
 #
 #  Logs
 #    /tmp/gentoo-install.log        (live system)
 #    /var/log/gentoo-install.log    (inside the new system)
+#
+#  Needs bash 4.4 or newer. Built from src/ by build.sh: edit those files,
+#  not the generated installers.
 # =============================================================================
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.4.0"
 readonly MNT="/mnt/gentoo"
 readonly LIVE_LOG="/tmp/gentoo-install.log"
 readonly LIVE_CONF_COPY="/tmp/gentoo-install.conf"
@@ -47,7 +50,7 @@ readonly TARGET_LOG="/var/log/gentoo-install.log"
 readonly CONF_PATH="/root/gentoo-install.conf"
 readonly PROGRESS_PATH="/root/.gentoo-install-progress"
 readonly FAILED_PATH="/root/.gentoo-install-failed-optional"
-readonly SCRIPT_PATH="/root/gentoo-install.sh"
+readonly SCRIPT_PATH="/root/gentoo_install.sh"
 readonly NOTES_NAME="GENTOO-POST-INSTALL-NOTES.txt"
 readonly LUKS_NAME="cryptroot"
 readonly BTRFS_OPTS="noatime,compress=zstd:1"
@@ -67,19 +70,21 @@ LOG="$LIVE_LOG"
 IN_CHROOT="no"
 CURRENT_STEP=""
 SELF=""
+WORK_DIR=""
 
 # Every answer and detected value that the second (chroot) stage needs.
 CONFIG_VARS=(
     DE DM INIT SWAY_AUTOSTART USE_BINPKG BINHOST_V3 TUNE_CPU_FLAGS KERNEL_PKG
-    BOOT_MODE BOOTLOADER PART_MODE DISK ESP_PART FORMAT_ESP BIOS_PART BOOT_PART
+    BOOT_MODE UEFI_BITS BOOTLOADER PART_MODE PTABLE DISK ESP_PART FORMAT_ESP BIOS_PART BOOT_PART
     ROOT_PART SWAP_PART GRUB_DISK DUAL_BOOT NEED_BOOT_PART IS_SSD
     FS ENCRYPT SWAP_MODE SWAP_SIZE_GIB
     NEW_HOSTNAME TIMEZONE LOCALE KEYMAP XKB_LAYOUT XKB_VARIANT
     USERNAME PRIV_TOOL ROOT_HASH USER_HASH
     NET_TOOL WANT_BT WANT_CUPS WANT_SSH WANT_FLATPAK FLATPAK_APPS EXTRA_PKGS
     CPU_VENDOR CPU_MODEL NPROC RAM_GIB IS_LAPTOP HAS_WIFI HAS_BT VIRT SECURE_BOOT
-    HAS_NVIDIA HAS_AMD HAS_INTEL GPU_VM GPU_DRIVER VIDEO_CARDS NVIDIA_GEN
+    HAS_NVIDIA HAS_AMD HAS_INTEL GPU_VM GPU_DRIVER VIDEO_CARDS NVIDIA_GEN HYBRID_GPU
     IS_APPLE MAC_MODEL LIVE_BOOT_MODE USER_SHELL
+    BCM_WIFI WANT_BCM_WL WANT_POWER POWER_TOOL WANT_MBPFAN
     PROFILE_SUFFIX STAGE3_VARIANT MAKE_JOBS EMERGE_JOBS
     KERNEL_CMDLINE GRUB_EXTRA_CMDLINE DIST_BASE GENTOO_MIRRORS_VALUE
 )
@@ -94,11 +99,69 @@ init_defaults() {
     XKB_LAYOUT="us"
     GPU_DRIVER="mesa"
     USER_SHELL="bash"
+    PTABLE="gpt"
     ROOT_PASSWORD=""
     USER_PASSWORD=""
     LUKS_PASSWORD=""
     STAGE3_URL=""
     STAGE3_FILE=""
+}
+
+# ----------------------------------------------------------------------------
+# Temporary files: everything goes into one private directory that is removed
+# when the script exits.
+# ----------------------------------------------------------------------------
+make_work_dir() {
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then return 0; fi
+    WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gentoo_install.XXXXXX")
+    chmod 700 -- "$WORK_DIR"
+}
+
+remove_work_dir() {
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then rm -rf -- "$WORK_DIR"; fi
+    WORK_DIR=""
+}
+
+# work_file NAME: a new private temporary file (prints its path).
+work_file() {
+    make_work_dir
+    mktemp "${WORK_DIR}/${1:-tmp}.XXXXXX"
+}
+
+# self_path: the absolute path of this script, without GNU readlink -f.
+self_path() {
+    local dir base
+    dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    base=$(basename -- "${BASH_SOURCE[0]}")
+    printf '%s/%s\n' "$dir" "$base"
+}
+
+# sed_inplace SCRIPT FILE: edit FILE with sed, portably (no GNU sed -i).
+sed_inplace() {
+    local script=$1 file=$2 tmp
+    tmp=$(mktemp "${file}.XXXXXX")
+    if sed "$script" "$file" >"$tmp"; then
+        cat -- "$tmp" >"$file"
+        rm -f -- "$tmp"
+    else
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
+# strip_colors: remove terminal colour codes from standard input
+# (portable: no \x escapes in the sed script).
+strip_colors() {
+    local esc
+    esc=$(printf '\033')
+    sed "s/${esc}\[[0-9;]*m//g"
+}
+
+# clear_dir DIR: delete everything inside DIR, keeping DIR itself.
+clear_dir() {
+    if [ -d "$1" ]; then
+        find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    fi
 }
 
 # Login shells offered for the user account. These are the interactive login
@@ -121,7 +184,7 @@ SHELL_CATALOG=(
 shell_field() {
     local entry
     for entry in "${SHELL_CATALOG[@]}"; do
-        if [[ ${entry%%|*} == "$1" ]]; then
+        if [ "${entry%%|*}" = "$1" ]; then
             cut -d'|' -f"$2" <<<"$entry"
             return 0
         fi
@@ -134,7 +197,7 @@ valid_shell_choice() { shell_field "$1" 1 >/dev/null; }
 # ----------------------------------------------------------------------------
 # Output helpers
 # ----------------------------------------------------------------------------
-if [[ -t 1 ]]; then
+if [ -t 1 ]; then
     C_RESET=$'\e[0m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
     C_RED=$'\e[1;31m'; C_GREEN=$'\e[1;32m'; C_YELLOW=$'\e[1;33m'
     C_BLUE=$'\e[1;34m'; C_CYAN=$'\e[1;36m'
@@ -149,11 +212,11 @@ log() {
 
 term_width() {
     local w
-    w=$(tput cols 2>/dev/null || echo 80)
+    w=$(tput cols 2>/dev/null || printf '%s\n' 80)
     [[ $w =~ ^[0-9]+$ ]] || w=80
     if (( w > 100 )); then w=100; fi
     if (( w < 50 )); then w=50; fi
-    echo "$w"
+    printf '%s\n' "$w"
 }
 
 hr() {
@@ -163,54 +226,55 @@ hr() {
     printf '%s%s%s\n' "$C_BLUE" "${line// /=}" "$C_RESET"
 }
 
-section() {
-    echo
+cli_section() {
+    printf '\n'
     hr
     printf '%s  %s%s\n' "$C_BOLD" "$*" "$C_RESET"
     hr
     log "===== $* ====="
 }
 
-subsection() {
-    echo
+cli_subsection() {
+    printf '\n'
     printf '%s--- %s ---%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"
     log "--- $* ---"
 }
 
 # say "paragraph" ["paragraph" ...]: print wrapped, indented paragraphs.
-say() {
+cli_say() {
     local w p
     w=$(( $(term_width) - 4 ))
     for p in "$@"; do
         printf '%s\n' "$p" | fold -s -w "$w" | sed 's/^/  /'
-        echo
+        printf '\n'
     done
 }
 
 # say_pre "text": show preformatted text (tables, lists) without re-wrapping.
-say_pre() {
+cli_say_pre() {
     printf '%s\n\n' "$1"
 }
 
-# Front-end hooks. The console front end needs none of them; the TUI overrides them.
-handoff_screen() { :; }     # called before a full-screen program (cfdisk, nmtui, a shell) takes over
-ui_install_phase() { :; }   # called when the unattended installation starts
-ui_finish_phase() { :; }    # called before the final questions
+# Front-end hooks: handoff_screen runs before a full-screen program (cfdisk,
+# nmtui, a shell) takes over, ui_install_phase when the unattended
+# installation starts, ui_finish_phase before the final questions. The console
+# front end needs none of them (src/90_main_cli.sh); the TUI defines them.
+cli_handoff_screen() { :; }
 
 # yn_default VAR FALLBACK: the y/n default for a question whose previous answer is in VAR.
 yn_default() {
     case "${!1:-}" in
-        yes) echo "y" ;;
-        no) echo "n" ;;
-        *) echo "$2" ;;
+        yes) printf '%s\n' "y" ;;
+        no) printf '%s\n' "n" ;;
+        *) printf '%s\n' "$2" ;;
     esac
 }
 
-info() { printf '%s[ INFO ]%s %s\n' "$C_CYAN" "$C_RESET" "$*"; log "INFO: $*"; }
-ok()   { printf '%s[  OK  ]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; log "OK: $*"; }
-warn() { printf '%s[ WARN ]%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; log "WARN: $*"; }
+cli_info() { printf '%s[ INFO ]%s %s\n' "$C_CYAN" "$C_RESET" "$*"; log "INFO: $*"; }
+cli_ok() { printf '%s[  OK  ]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; log "OK: $*"; }
+cli_warn() { printf '%s[ WARN ]%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; log "WARN: $*"; }
 err()  { printf '%s[ FAIL ]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; log "FAIL: $*"; }
-die()  { err "$*"; exit 1; }
+cli_die() { err "$*"; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -218,7 +282,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # RUN_CMD remembers the command, because when it fails the error trap only sees
 # the last part of the pipeline (tee).
 RUN_CMD=""
-run() {
+cli_run() {
     printf '%s    $ %s%s\n' "$C_DIM" "$*" "$C_RESET"
     log "RUN: $*"
     RUN_CMD="$*"
@@ -232,42 +296,42 @@ show_build_log_excerpt() {
     blog=$(grep -o "The complete build log is located at '[^']*'" "$LOG" 2>/dev/null | tail -n1 || true)
     blog=${blog#*located at \'}
     blog=${blog%\'}
-    if [[ -z $blog || ! -r $blog ]]; then return 0; fi
+    if [ -z "$blog" ] || [ ! -r "$blog" ]; then return 0; fi
     local pattern="\\*\\*\\* \\[|error:|Error [0-9]+|Can't locate|No such file or directory|Illegal instruction|Segmentation fault|Killed|undefined reference|command not found|can't get .--help' info"
     errors=$(grep -nE "$pattern" "$blog" 2>/dev/null \
         | grep -vE "^[0-9]+:(checking|configure:)|-Werror|-Wno-error" || true)
     local first=${errors%%:*} from
     {
-        echo
-        echo "---- Why it failed: lines from the package's build log ----"
-        echo "Build log: ${blog}"
-        echo "(from the live system: ${MNT}${blog})"
+        printf '\n'
+        printf '%s\n' "---- Why it failed: lines from the package's build log ----"
+        printf '%s\n' "Build log: ${blog}"
+        printf '%s\n' "(from the live system: ${MNT}${blog})"
         if [[ $first =~ ^[0-9]+$ ]]; then
             from=$(( first > 12 ? first - 12 : 1 ))
-            echo
-            echo "Where it first went wrong (lines ${from}-$(( first + 3 )); the cause is usually just above the first '***' or 'error' line):"
+            printf '\n'
+            printf '%s\n' "Where it first went wrong (lines ${from}-$(( first + 3 )); the cause is usually just above the first '***' or 'error' line):"
             sed -n "${from},$(( first + 3 ))p" "$blog"
         fi
-        echo
-        echo "Last lines of the build log:"
+        printf '\n'
+        printf '%s\n' "Last lines of the build log:"
         tail -n 25 "$blog"
-        echo
+        printf '\n'
         if grep -q "Can't locate .*\.pm in @INC" "$blog" 2>/dev/null; then
-            echo "A Perl module could not be loaded. This usually happens after Perl was"
-            echo "upgraded and its modules were not rebuilt. Fix it from the live system with:"
-            echo "  chroot ${MNT} /bin/bash -c 'source /etc/profile && perl-cleaner --all -- --quiet-build=y'"
-            echo "then resume the installer."
-            echo
+            printf '%s\n' "A Perl module could not be loaded. This usually happens after Perl was"
+            printf '%s\n' "upgraded and its modules were not rebuilt. Fix it from the live system with:"
+            printf '%s\n' "  chroot ${MNT} /bin/bash -c 'source /etc/profile && perl-cleaner --all -- --quiet-build=y'"
+            printf '%s\n' "then resume the installer."
+            printf '\n'
         fi
-        if [[ -z $errors && -n $(tail -c 1 "$blog") ]]; then
-            echo "The build log stops in the middle of a line without any error message:"
-            echo "the build lost its output channel before it could report anything."
-            echo "Possible causes: Portage could not write the build output to the screen,"
-            echo "the disk is full, or the filesystem became read-only (free space below)."
+        if [ -z "$errors" ] && [ -n "$(tail -c 1 "$blog")" ]; then
+            printf '%s\n' "The build log stops in the middle of a line without any error message:"
+            printf '%s\n' "the build lost its output channel before it could report anything."
+            printf '%s\n' "Possible causes: Portage could not write the build output to the screen,"
+            printf '%s\n' "the disk is full, or the filesystem became read-only (free space below)."
         fi
-        echo "Free space on the new system's root filesystem:"
+        printf '%s\n' "Free space on the new system's root filesystem:"
         df -h / 2>/dev/null | sed 's/^/    /' || true
-        echo "------------------------------------------------------------"
+        printf '%s\n' "------------------------------------------------------------"
     } | tee -a "$LOG"
 }
 
@@ -301,23 +365,23 @@ disk_free_kib() {
 free_package_caches() {
     local dir loc conf
     local -a dirs=()
-    dirs+=("$(portageq envvar PKGDIR 2>/dev/null || echo /var/cache/binpkgs)")
+    dirs+=("$(portageq envvar PKGDIR 2>/dev/null || printf '%s\n' /var/cache/binpkgs)")
     dirs+=("/var/cache/binhost")
     # binrepos.conf may be a file or a directory of files; read regular files only.
     for conf in /etc/portage/binrepos.conf /etc/portage/binrepos.conf/*.conf; do
-        [[ -f $conf ]] || continue
+        [ -f "$conf" ] || continue
         while IFS= read -r loc; do
-            if [[ -n $loc ]]; then dirs+=("$loc"); fi
+            if [ -n "$loc" ]; then dirs+=("$loc"); fi
         done < <(sed -n 's/^[[:space:]]*location[[:space:]]*=[[:space:]]*//p' "$conf")
     done
-    if [[ ${1:-} == "--all" ]]; then
-        dirs+=("$(portageq envvar DISTDIR 2>/dev/null || echo /var/cache/distfiles)")
-        dirs+=("$(portageq envvar PORTAGE_TMPDIR 2>/dev/null || echo /var/tmp)/portage")
+    if [ "${1:-}" = "--all" ]; then
+        dirs+=("$(portageq envvar DISTDIR 2>/dev/null || printf '%s\n' /var/cache/distfiles)")
+        dirs+=("$(portageq envvar PORTAGE_TMPDIR 2>/dev/null || printf '%s\n' /var/tmp)/portage")
     fi
     for dir in "${dirs[@]}"; do
         dir=$(trim "$dir")
-        if [[ -n $dir && $dir != "/" && -d $dir ]]; then
-            find "$dir" -mindepth 1 -delete 2>/dev/null || true
+        if [ -n "$dir" ] && [ "$dir" != "/" ] && [ -d "$dir" ]; then
+            clear_dir "$dir"
             log "Cleared ${dir}"
         fi
     done
@@ -334,10 +398,10 @@ trim() {
 # Error handling
 # ----------------------------------------------------------------------------
 print_resume_help() {
-    if [[ -f "${MNT}${CONF_PATH}" ]]; then
-        echo
+    if [ -f "${MNT}${CONF_PATH}" ]; then
+        printf '\n'
         say "Nothing is lost. Every finished step is recorded, so the installer can continue where it stopped." \
-            "What to do: 1) Read the end of the log to see what went wrong. 2) Fix the cause (common ones: a network hiccup, a package that needs a USE flag change, a full disk). 3) Run:  bash ${SELF:-gentoo-install.sh} --resume" \
+            "What to do: 1) Read the end of the log to see what went wrong. 2) Fix the cause (common ones: a network hiccup, a package that needs a USE flag change, a full disk). 3) Run:  bash ${SELF:-gentoo_install.sh} --resume" \
             "To fix something inside the new system first, run:  chroot ${MNT} /bin/bash  then  source /etc/profile. Type exit when done, then resume."
     fi
 }
@@ -345,17 +409,17 @@ print_resume_help() {
 on_error() {
     local rc=$1 line=$2 cmd=$3
     trap - ERR
-    if [[ ${TUI_ACTIVE:-no} == "yes" ]]; then clear 2>/dev/null || true; TUI_ACTIVE="no"; fi
+    if [ "${TUI_ACTIVE:-no}" = "yes" ]; then clear 2>/dev/null || true; TUI_ACTIVE="no"; fi
     if (( rc == 0 )); then rc=1; fi
     # shellcheck disable=SC2016  # the literal text of run's tee command, as the trap reports it
-    if [[ $cmd == 'tee -a "$LOG"' && -n ${RUN_CMD:-} ]]; then cmd=$RUN_CMD; fi
-    echo
+    if [ "$cmd" = 'tee -a "$LOG"' ] && [ -n "${RUN_CMD:-}" ]; then cmd=$RUN_CMD; fi
+    printf '\n'
     err "A command failed (exit code ${rc}, script line ${line}):"
     err "    ${cmd}"
     err "Full log: ${LOG}"
-    if [[ $IN_CHROOT == "yes" ]]; then
+    if [ "$IN_CHROOT" = "yes" ]; then
         err "This happened inside the new system during step ${CURRENT_STEP:-unknown}."
-        if [[ $cmd == emerge* ]]; then show_build_log_excerpt; fi
+        if [[ $cmd = emerge* ]]; then show_build_log_excerpt; fi
     else
         print_resume_help
     fi
@@ -364,10 +428,10 @@ on_error() {
 
 on_interrupt() {
     trap - ERR INT
-    if [[ ${TUI_ACTIVE:-no} == "yes" ]]; then clear 2>/dev/null || true; TUI_ACTIVE="no"; fi
-    echo
+    if [ "${TUI_ACTIVE:-no}" = "yes" ]; then clear 2>/dev/null || true; TUI_ACTIVE="no"; fi
+    printf '\n'
     err "Interrupted by user (Ctrl+C)."
-    if [[ $IN_CHROOT != "yes" ]]; then
+    if [ "$IN_CHROOT" != "yes" ]; then
         print_resume_help
     fi
     exit 130
@@ -378,7 +442,7 @@ safe_source() {
     trap - ERR
     set +eu
     # shellcheck disable=SC1090
-    source "$1"
+    . "$1"
     set -eu
     trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
 }
@@ -391,22 +455,22 @@ safe_source() {
 read_line() {
     local __rl_var=$1 __rl_prompt=$2 __rl_val
     if ! IFS= read -r -p "$__rl_prompt" __rl_val; then
-        echo
+        printf '\n'
         die "Input ended unexpectedly. Run the script from an interactive terminal."
     fi
     printf -v "$__rl_var" '%s' "$__rl_val"
 }
 
-pause() {
+cli_pause() {
     local __p
     read_line __p "  Press Enter to continue... "
 }
 
 # ask VAR "Question" "default" [validator_function]
-ask() {
+cli_ask() {
     local __var=$1 __q=$2 __def=${3:-} __check=${4:-} __a
     while true; do
-        if [[ -n $__def ]]; then
+        if [ -n "$__def" ]; then
             read_line __a "  ${__q} [${__def}]: "
             __a=$(trim "$__a")
             __a=${__a:-$__def}
@@ -414,24 +478,24 @@ ask() {
             read_line __a "  ${__q}: "
             __a=$(trim "$__a")
         fi
-        if [[ -z $__a ]]; then
+        if [ -z "$__a" ]; then
             warn "An answer is required."
             continue
         fi
-        if [[ -n $__check ]] && ! "$__check" "$__a"; then
+        if [ -n "$__check" ] && ! "$__check" "$__a"; then
             continue
         fi
         printf -v "$__var" '%s' "$__a"
         log "ANSWER: ${__q} => ${__a}"
-        echo
+        printf '\n'
         return 0
     done
 }
 
 # ask_yn VAR "Question" y|n   (VAR becomes "yes" or "no")
-ask_yn() {
+cli_ask_yn() {
     local __var=$1 __q=$2 __def=$3 __a __hint="y/N"
-    if [[ $__def == "y" ]]; then __hint="Y/n"; fi
+    if [ "$__def" = "y" ]; then __hint="Y/n"; fi
     while true; do
         read_line __a "  ${__q} [${__hint}]: "
         __a=$(trim "$__a")
@@ -443,18 +507,18 @@ ask_yn() {
         esac
     done
     log "ANSWER: ${__q} => ${!__var}"
-    echo
+    printf '\n'
 }
 
 # yesno "Question" y|n   (returns 0 for yes)
 yesno() {
     local __yn
     ask_yn __yn "$1" "$2"
-    [[ $__yn == "yes" ]]
+    [ "$__yn" = "yes" ]
 }
 
 # choose VAR "Question" DEFAULT_VALUE "value|Label" ...
-choose() {
+cli_choose() {
     local __var=$1 __q=$2 __def=$3
     shift 3
     local -a __vals=() __labs=()
@@ -464,7 +528,7 @@ choose() {
         __labs+=("${__o#*|}")
     done
     for __i in "${!__vals[@]}"; do
-        if [[ ${__vals[__i]} == "$__def" ]]; then __defi=$(( __i + 1 )); fi
+        if [ "${__vals[__i]}" = "$__def" ]; then __defi=$(( __i + 1 )); fi
     done
     printf '\n  %s%s%s\n' "$C_BOLD" "$__q" "$C_RESET"
     for __i in "${!__vals[@]}"; do
@@ -481,7 +545,7 @@ choose() {
         if [[ $__a =~ ^[0-9]+$ ]] && (( __a >= 1 && __a <= ${#__vals[@]} )); then
             printf -v "$__var" '%s' "${__vals[__a - 1]}"
             log "ANSWER: ${__q} => ${__vals[__a - 1]}"
-            echo
+            printf '\n'
             return 0
         fi
         warn "Please enter a number between 1 and ${#__vals[@]}."
@@ -489,7 +553,7 @@ choose() {
 }
 
 # choose_multi VAR "Question" "value|Label" ...   (VAR = space separated values)
-choose_multi() {
+cli_choose_multi() {
     local __var=$1 __q=$2
     shift 2
     local -a __vals=() __labs=() __picked=() __toks=()
@@ -506,8 +570,8 @@ choose_multi() {
         read_line __a "  Numbers separated by spaces (example: 1 4 7), 'all', or Enter for none: "
         __a=$(trim "${__a//,/ }")
         __picked=()
-        if [[ -z $__a || ${__a,,} == "none" ]]; then break; fi
-        if [[ ${__a,,} == "all" ]]; then
+        if [ -z "$__a" ] || [ "${__a,,}" = "none" ]; then break; fi
+        if [ "${__a,,}" = "all" ]; then
             __picked=("${__vals[@]}")
             break
         fi
@@ -521,7 +585,7 @@ choose_multi() {
                 __bad="yes"
             fi
         done
-        if [[ $__bad == "no" ]]; then break; fi
+        if [ "$__bad" = "no" ]; then break; fi
     done
     for __p in "${__picked[@]}"; do
         if [[ " $__out " != *" $__p "* ]]; then
@@ -530,22 +594,22 @@ choose_multi() {
     done
     printf -v "$__var" '%s' "$__out"
     log "ANSWER: ${__q} => ${__out:-none}"
-    echo
+    printf '\n'
 }
 
 # ask_password VAR "what" MIN_LENGTH
-ask_password() {
+cli_ask_password() {
     local __var=$1 __what=$2 __min=${3:-1} __p1 __p2
     while true; do
-        if ! IFS= read -r -s -p "  Type the ${__what}: " __p1; then echo; die "Input ended unexpectedly."; fi
-        echo
+        if ! IFS= read -r -s -p "  Type the ${__what}: " __p1; then printf '\n'; die "Input ended unexpectedly."; fi
+        printf '\n'
         if (( ${#__p1} < __min )); then
             if (( __min == 1 )); then warn "It cannot be empty."; else warn "It must be at least ${__min} characters long."; fi
             continue
         fi
-        if ! IFS= read -r -s -p "  Type it again to confirm: " __p2; then echo; die "Input ended unexpectedly."; fi
-        echo
-        if [[ $__p1 != "$__p2" ]]; then
+        if ! IFS= read -r -s -p "  Type it again to confirm: " __p2; then printf '\n'; die "Input ended unexpectedly."; fi
+        printf '\n'
+        if [ "$__p1" != "$__p2" ]; then
             warn "The two entries did not match. Try again."
             continue
         fi
@@ -558,6 +622,10 @@ ask_password() {
         return 0
     done
 }
+
+# The rest of the installer calls say, choose, ask, ... without the cli_
+# prefix. Those names are defined by each front end: src/90_main_cli.sh maps
+# them to the console versions above, src/60_tui.sh to dialog boxes.
 
 # ----------------------------------------------------------------------------
 # Validators (print a warning and return 1 when the value is not acceptable)
@@ -597,8 +665,8 @@ valid_keymap() {
         warn "That does not look like a keymap name."
         return 1
     fi
-    if [[ -n $(find /usr/share/keymaps -name 'us.map*' -print -quit 2>/dev/null || true) ]]; then
-        if [[ -n $(find /usr/share/keymaps -name "${k}.map*" -print -quit 2>/dev/null || true) ]]; then
+    if [ -n "$(find /usr/share/keymaps -name 'us.map*' -print 2>/dev/null | head -n1 || true)" ]; then
+        if [ -n "$(find /usr/share/keymaps -name "${k}.map*" -print 2>/dev/null | head -n1 || true)" ]; then
             return 0
         fi
         warn "Keymap '${k}' was not found. Examples: us, uk, de, de-latin1, fr, es, it, br-abnt2, pl, ru, dvorak."
@@ -612,7 +680,7 @@ valid_xkb_layout() {
         warn "XKB layout names are short lowercase codes such as us, gb, de, fr, es, ch, latam. Console keymap names like 'de-latin1' do not work here."
         return 1
     fi
-    if [[ -f /usr/share/X11/xkb/symbols/us && ! -f /usr/share/X11/xkb/symbols/$1 ]]; then
+    if [ -f /usr/share/X11/xkb/symbols/us ] && [ ! -f "/usr/share/X11/xkb/symbols/$1" ]; then
         warn "XKB layout '$1' was not found in /usr/share/X11/xkb/symbols."
         return 1
     fi
@@ -625,7 +693,7 @@ valid_locale() {
         warn "Use the form language_COUNTRY.UTF-8, for example en_US.UTF-8, en_GB.UTF-8, de_DE.UTF-8."
         return 1
     fi
-    if [[ -r /usr/share/i18n/SUPPORTED ]] && grep -q '^en_US.UTF-8 ' /usr/share/i18n/SUPPORTED \
+    if [ -r /usr/share/i18n/SUPPORTED ] && grep -q '^en_US.UTF-8 ' /usr/share/i18n/SUPPORTED \
         && ! grep -q "^${l} " /usr/share/i18n/SUPPORTED; then
         warn "Locale '${l}' is not in the list of supported locales (/usr/share/i18n/SUPPORTED)."
         return 1
@@ -704,13 +772,13 @@ BUILTIN_TIMEZONES=(
 
 # True when the live system has a real timezone database (the LiveGUI does).
 tz_live_usable() {
-    [[ -r /usr/share/zoneinfo/zone1970.tab && -f /usr/share/zoneinfo/UTC ]]
+    [ -r /usr/share/zoneinfo/zone1970.tab ] && [ -f /usr/share/zoneinfo/UTC ]
 }
 
 # Print all known timezone names, one per line.
 tz_names() {
     if tz_live_usable; then
-        { echo "UTC"; grep -v '^#' /usr/share/zoneinfo/zone1970.tab | awk -F'\t' 'NF >= 3 {print $3}'; } | sort -u
+        { printf '%s\n' "UTC"; grep -v '^#' /usr/share/zoneinfo/zone1970.tab | awk -F'\t' 'NF >= 3 {print $3}'; } | sort -u
     else
         printf '%s\n' "${BUILTIN_TIMEZONES[@]}"
     fi
@@ -736,33 +804,33 @@ print_columns() {
         }' <<<"$1"
 }
 
-browse_timezones() {
+cli_browse_timezones() {
     local names region cities
     names=$(tz_names)
-    echo
-    echo "  Regions:"
-    print_columns "$(awk -F/ 'NF > 1 {print $1}' <<<"$names" | sort -u; echo "UTC")"
+    printf '\n'
+    printf '%s\n' "  Regions:"
+    print_columns "$(awk -F/ 'NF > 1 {print $1}' <<<"$names" | sort -u; printf '%s\n' "UTC")"
     read_line region "  Region to list (Enter to go back): "
     region=$(trim "$region")
-    if [[ -z $region ]]; then return 0; fi
-    if [[ $region == "UTC" ]]; then
-        echo "  Type UTC to use it."
+    if [ -z "$region" ]; then return 0; fi
+    if [ "$region" = "UTC" ]; then
+        printf '%s\n' "  Type UTC to use it."
         return 0
     fi
     cities=$(awk -v r="${region}/" 'index($0, r) == 1 {print substr($0, length(r) + 1)}' <<<"$names")
-    if [[ -z $cities ]]; then
+    if [ -z "$cities" ]; then
         warn "There is no region called '${region}'. Region names are case sensitive, for example Europe."
         return 0
     fi
-    echo
+    printf '\n'
     print_columns "$cities"
-    echo
-    echo "  Now type the full name, for example ${region}/$(head -n1 <<<"$cities")"
+    printf '\n'
+    printf '%s\n' "  Now type the full name, for example ${region}/$(head -n1 <<<"$cities")"
 }
 
 valid_timezone() {
     local tz=$1
-    if [[ $tz == "list" ]]; then
+    if [ "$tz" = "list" ]; then
         browse_timezones
         return 1
     fi
@@ -771,7 +839,7 @@ valid_timezone() {
         return 1
     fi
     if tz_live_usable; then
-        if [[ -f /usr/share/zoneinfo/$tz ]]; then return 0; fi
+        if [ -f "/usr/share/zoneinfo/$tz" ]; then return 0; fi
         warn "Timezone '${tz}' was not found. Names are case sensitive. Type 'list' to browse."
         return 1
     fi
@@ -815,41 +883,73 @@ have_internet() {
 # ----------------------------------------------------------------------------
 # Live environment checks
 # ----------------------------------------------------------------------------
-usage() {
-    cat <<EOF
-gentoo-install.sh ${SCRIPT_VERSION}: guided Gentoo Linux installer for amd64
-
-Usage:
-  bash gentoo-install.sh            Start a new installation
-  bash gentoo-install.sh --resume   Continue after fixing a failed step
-  bash gentoo-install.sh --help     Show this help
-
-Run it as root from the official Gentoo live image (minimal or LiveGUI).
-Download it first, then run it. Piping it into bash does not work because
-the installer reads your answers from the keyboard.
-EOF
+# parse_args ARGS...: sets RUN_MODE to fresh, resume, chroot or help. Long
+# options are translated to their short forms, then read with getopts.
+RUN_MODE="fresh"
+parse_args() {
+    local arg opt
+    local -a args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --help) args+=(-h) ;;
+            --resume) args+=(-r) ;;
+            --chroot-stage) args+=(-C) ;;
+            --*) usage >&2; printf 'Unknown option: %s\n' "$arg" >&2; exit 1 ;;
+            *) args+=("$arg") ;;
+        esac
+    done
+    set -- "${args[@]}"
+    OPTIND=1
+    while getopts ':hrC' opt; do
+        case "$opt" in
+            h) RUN_MODE="help" ;;
+            r) RUN_MODE="resume" ;;
+            C) RUN_MODE="chroot" ;;
+            *) usage >&2; printf 'Unknown option: -%s\n' "$OPTARG" >&2; exit 1 ;;
+        esac
+    done
+    shift $(( OPTIND - 1 ))
+    if [ "$#" -gt 0 ]; then
+        usage >&2
+        printf 'Unexpected argument: %s\n' "$1" >&2
+        exit 1
+    fi
 }
 
+# The bash version check runs before anything that needs bash 4.4 features.
+check_bash_version() {
+    if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+        printf '%s\n' "This installer needs bash 4.4 or newer (this is bash ${BASH_VERSION})." >&2
+        exit 1
+    fi
+}
+
+# Tools the live side needs. Missing ones are listed together, then the
+# installer stops before anything is changed.
+LIVE_TOOLS=(
+    lsblk blkid wipefs sfdisk partprobe blockdev mkfs.ext4 mkfs.vfat mkswap
+    mount umount mountpoint findmnt chroot tar xz sha256sum awk sed grep fold
+    cut tr sort head tail od df find mktemp install cat cp rm mkdir chmod
+    udevadm timeout date
+)
+
 live_preflight() {
-    if [[ $EUID -ne 0 ]]; then
-        die "Please run as root. On the LiveGUI image use: sudo bash gentoo-install.sh"
+    if [ "$(id -u)" -ne 0 ]; then
+        die "Please run as root. On the LiveGUI image use: sudo bash ${SELF##*/}"
     fi
-    if [[ $(uname -m) != "x86_64" ]]; then
+    if [ "$(uname -m)" != "x86_64" ]; then
         die "This installer supports amd64 (x86_64) only. This machine reports: $(uname -m)."
-    fi
-    if (( BASH_VERSINFO[0] < 5 )); then
-        die "Bash 5 or newer is required."
     fi
     local -a missing=()
     local t
-    for t in lsblk blkid wipefs sfdisk mkfs.ext4 mkswap mount umount mountpoint findmnt chroot tar xz sha256sum awk sed grep fold udevadm; do
+    for t in "${LIVE_TOOLS[@]}"; do
         have "$t" || missing+=("$t")
     done
     if ! have curl && ! have wget; then missing+=("curl or wget"); fi
-    if (( ${#missing[@]} > 0 )); then
+    if [ "${#missing[@]}" -gt 0 ]; then
         die "Missing tools on this live system: ${missing[*]}. Please use the official Gentoo minimal or LiveGUI image."
     fi
-    mkdir -p "$MNT"
+    mkdir -p -- "$MNT"
 }
 
 welcome() {
@@ -878,16 +978,19 @@ live_keyboard() {
 list_interfaces() {
     local n
     for n in /sys/class/net/*; do
-        [[ -e $n ]] || continue
+        [ -e "$n" ] || continue
         n=${n##*/}
-        [[ $n == "lo" ]] && continue
-        echo "$n"
+        [ "$n" = "lo" ] && continue
+        printf '%s\n' "$n"
     done
 }
 
 network_step() {
     section "Network connection"
     say "The installer downloads the Gentoo base system and all packages from the internet, so a working connection is required. Wired Ethernet usually works automatically."
+    if [ "$BCM_WIFI" = "wl" ]; then
+        say "This computer's Broadcom Wi-Fi card needs Broadcom's own 'wl' driver, which the live system does not have, so Wi-Fi cannot work here. Use a wired connection, a USB Ethernet adapter, a USB Wi-Fi adapter, or USB tethering from a phone for the installation. The new system can get the wl driver (Part 5 asks)."
+    fi
     local action iface
     while ! have_internet; do
         warn "No working internet connection was detected (could not reach ${DIST_BASE})."
@@ -901,8 +1004,8 @@ network_step() {
         case "$action" in
             netsetup)
                 local -a ifopts=()
-                while read -r iface; do ifopts+=("${iface}|${iface}"); done < <(list_interfaces)
-                if (( ${#ifopts[@]} == 0 )); then warn "No network interfaces found."; continue; fi
+                while IFS= read -r iface; do ifopts+=("${iface}|${iface}"); done < <(list_interfaces)
+                if [ "${#ifopts[@]}" -eq 0 ]; then warn "No network interfaces found."; continue; fi
                 choose iface "Which network interface?" "${ifopts[0]%%|*}" "${ifopts[@]}"
                 handoff_screen
                 net-setup "$iface" || true ;;
@@ -928,20 +1031,20 @@ sync_clock() {
             synced="yes"
         fi
     fi
-    if [[ $synced == "no" ]] && have ntpd; then
+    if [ "$synced" = "no" ] && have ntpd; then
         if timeout 60 ntpd -q -g -n -p pool.ntp.org >>"$LOG" 2>&1 || timeout 60 ntpd -q -n -p pool.ntp.org >>"$LOG" 2>&1; then
             synced="yes"
         fi
     fi
-    if [[ $synced == "yes" ]]; then
+    if [ "$synced" = "yes" ]; then
         ok "Clock set: $(date -u '+%Y-%m-%d %H:%M UTC')"
     else
         warn "Could not sync the clock automatically. Current time: $(date -u '+%Y-%m-%d %H:%M UTC')"
     fi
-    if (( $(date +%Y) < 2026 )); then
+    if [ "$(date +%Y)" -lt 2026 ]; then
         warn "The system date looks wrong. Downloads and signature checks can fail."
         local d
-        ask d "Enter the current UTC date and time as MMDDhhmmYYYY (example: 092514302026)" "" 
+        ask d "Enter the current UTC date and time as MMDDhhmmYYYY (example: 092514302026)" ""
         if [[ $d =~ ^[0-9]{12}$ ]]; then
             run date -u "$d" || warn "Could not set the date."
         else
@@ -965,54 +1068,108 @@ sync_clock() {
 # and warns if it needs a different branch.
 nvidia_generation() {
     local id
-    if [[ ! $1 =~ ^0x[0-9a-fA-F]+$ ]]; then echo "current"; return 0; fi
+    if [[ ! $1 =~ ^0x[0-9a-fA-F]+$ ]]; then printf '%s\n' "current"; return 0; fi
     id=$(( $1 ))
-    if (( id >= 0x1e00 )); then echo "current"
-    elif (( id >= 0x1340 )); then echo "legacy580"
-    else echo "unsupported"; fi
+    if (( id >= 0x1e00 )); then printf '%s\n' "current"
+    elif (( id >= 0x1340 )); then printf '%s\n' "legacy580"
+    else printf '%s\n' "unsupported"; fi
+}
+
+# broadcom_wifi_kind DEVICE_ID: which driver a Broadcom Wi-Fi chip needs.
+#   wl    only Broadcom's proprietary wl driver (net-wireless/broadcom-sta):
+#         BCM4360 (most Macs from 2013 on), BCM4352, BCM43142, BCM43228
+#   b43   the in-kernel b43 driver plus firmware (sys-firmware/b43-firmware):
+#         BCM4311, 4312, 4315, 4318, 4319, 4321, 4322, 4331 (Macs up to 2012)
+#   (empty) supported by brcmsmac or brcmfmac with linux-firmware, or unknown
+broadcom_wifi_kind() {
+    case "$1" in
+        0x43a0|0x43b1|0x4365|0x4359) printf '%s\n' "wl" ;;
+        0x4311|0x4312|0x4315|0x4318|0x4319|0x4328|0x4329|0x432a|0x432b|0x432c|0x432d|0x4331)
+            printf '%s\n' "b43" ;;
+        *) ;;
+    esac
 }
 
 detect_gpus() {
-    HAS_NVIDIA="no"; HAS_AMD="no"; HAS_INTEL="no"; GPU_VM=""; NVIDIA_GEN=""
+    HAS_NVIDIA="no"; HAS_AMD="no"; HAS_INTEL="no"; GPU_VM=""; NVIDIA_GEN=""; HYBRID_GPU="no"
     GPU_NAMES=()
-    local d class vendor slot name gen
+    local d class vendor slot name gen count=0
     for d in /sys/bus/pci/devices/*; do
-        [[ -r $d/class && -r $d/vendor ]] || continue
+        [ -r "$d/class" ] && [ -r "$d/vendor" ] || continue
         class=$(<"$d/class")
-        [[ $class == 0x03* ]] || continue
+        [[ $class = 0x03* ]] || continue
         vendor=$(<"$d/vendor")
         slot=${d##*/}
         case "$vendor" in
             0x10de)
                 HAS_NVIDIA="yes"
-                gen=$(nvidia_generation "$(cat "$d/device" 2>/dev/null)")
+                count=$(( count + 1 ))
+                gen=$(nvidia_generation "$(cat -- "$d/device" 2>/dev/null)")
                 # With several NVIDIA cards, the oldest one decides.
                 case "${NVIDIA_GEN}:${gen}" in
                     :*|current:legacy580|current:unsupported|legacy580:unsupported) NVIDIA_GEN=$gen ;;
                 esac ;;
-            0x1002) HAS_AMD="yes" ;;
-            0x8086) HAS_INTEL="yes" ;;
-            0x15ad|0x80ee) [[ $GPU_VM == *vmware* ]] || GPU_VM+=" vmware" ;;
-            0x1af4) [[ $GPU_VM == *virgl* ]] || GPU_VM+=" virgl" ;;
-            0x1b36) [[ $GPU_VM == *qxl* ]] || GPU_VM+=" qxl" ;;
+            0x1002) HAS_AMD="yes"; count=$(( count + 1 )) ;;
+            0x8086) HAS_INTEL="yes"; count=$(( count + 1 )) ;;
+            0x15ad|0x80ee) [[ $GPU_VM = *vmware* ]] || GPU_VM+=" vmware" ;;
+            0x1af4) [[ $GPU_VM = *virgl* ]] || GPU_VM+=" virgl" ;;
+            0x1b36) [[ $GPU_VM = *qxl* ]] || GPU_VM+=" qxl" ;;
         esac
         name=""
         if have lspci; then
-            name=$(lspci -s "$slot" 2>/dev/null | cut -d' ' -f2- || true)
+            name=$(LC_ALL=C lspci -s "$slot" 2>/dev/null | cut -d' ' -f2- || true)
         fi
         GPU_NAMES+=("${name:-PCI ${slot} vendor ${vendor}}")
     done
     GPU_VM=$(trim "$GPU_VM")
+    # Two real graphics chips (an integrated one plus a dedicated one, as in
+    # many laptops): the desktop can offer to start programs on either.
+    if [ "$count" -ge 2 ]; then HYBRID_GPU="yes"; fi
+}
+
+# Broadcom Wi-Fi chips that need extra drivers or firmware (sets BCM_WIFI).
+detect_broadcom_wifi() {
+    local d kind
+    BCM_WIFI=""
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/class" ] && [ -r "$d/vendor" ] || continue
+        [[ $(<"$d/class") = 0x0280* ]] || continue
+        [ "$(<"$d/vendor")" = "0x14e4" ] || continue
+        kind=$(broadcom_wifi_kind "$(cat -- "$d/device" 2>/dev/null)")
+        if [ -n "$kind" ]; then BCM_WIFI=$kind; fi
+    done
+}
+
+# Apple T2 security chip (Macs from 2018 to 2020): PCI 106b:1801 or 106b:1802.
+has_apple_t2() {
+    local d dev
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/vendor" ] || continue
+        [ "$(<"$d/vendor")" = "0x106b" ] || continue
+        dev=$(cat -- "$d/device" 2>/dev/null || true)
+        case "$dev" in 0x1801|0x1802) return 0 ;; esac
+    done
+    return 1
+}
+
+# A RAID controller in "RAID" or Intel RST/VMD mode hides the disks behind it.
+has_raid_controller() {
+    local d
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/class" ] || continue
+        case "$(<"$d/class")" in 0x0104*) return 0 ;; esac
+    done
+    return 1
 }
 
 detect_hardware() {
     CPU_VENDOR=$(awk -F': *' '/^vendor_id/ {print $2; exit}' /proc/cpuinfo)
     CPU_MODEL=$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo)
-    NPROC=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo)
+    NPROC=$(getconf _NPROCESSORS_ONLN 2>/dev/null || grep -c '^processor' /proc/cpuinfo)
     local mem_kib
     mem_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
     RAM_GIB=$(( (mem_kib + 524288) / 1048576 ))
-    if (( RAM_GIB < 1 )); then RAM_GIB=1; fi
+    if [ "$RAM_GIB" -lt 1 ]; then RAM_GIB=1; fi
 
     local flags f
     flags=" $(awk -F': *' '/^flags/ {print $2; exit}' /proc/cpuinfo) "
@@ -1021,16 +1178,17 @@ detect_hardware() {
         if [[ $flags != *" $f "* ]]; then CPU_X86_64_V3="no"; fi
     done
 
-    if [[ -d /sys/firmware/efi ]]; then BOOT_MODE="uefi"; else BOOT_MODE="bios"; fi
+    if [ -d /sys/firmware/efi ]; then BOOT_MODE="uefi"; else BOOT_MODE="bios"; fi
     UEFI_BITS=""
-    if [[ -r /sys/firmware/efi/fw_platform_size ]]; then UEFI_BITS=$(</sys/firmware/efi/fw_platform_size); fi
+    if [ -r /sys/firmware/efi/fw_platform_size ]; then UEFI_BITS=$(</sys/firmware/efi/fw_platform_size); fi
+    if [ "$BOOT_MODE" = "uefi" ] && [ -z "$UEFI_BITS" ]; then UEFI_BITS="64"; fi
 
     SECURE_BOOT="off"
     local sb val
     for sb in /sys/firmware/efi/efivars/SecureBoot-*; do
-        [[ -r $sb ]] || continue
+        [ -r "$sb" ] || continue
         val=$(od -An -t u1 "$sb" 2>/dev/null | awk '{print $NF}')
-        if [[ $val == "1" ]]; then SECURE_BOOT="on"; fi
+        if [ "$val" = "1" ]; then SECURE_BOOT="on"; fi
     done
 
     VIRT="none"
@@ -1044,53 +1202,68 @@ detect_hardware() {
         *Microsoft*"Virtual Machine"*) VIRT="hyperv" ;;
         *Xen*) VIRT="xen" ;;
     esac
-    if [[ $VIRT == "none" && $flags == *" hypervisor "* ]]; then VIRT="other"; fi
+    if [ "$VIRT" = "none" ] && [[ $flags = *" hypervisor "* ]]; then VIRT="other"; fi
 
-    IS_APPLE="no"; MAC_MODEL=""
-    if [[ $vendor == *Apple* ]]; then IS_APPLE="yes"; MAC_MODEL=$(trim "$product"); fi
+    IS_APPLE="no"; MAC_MODEL=""; HAS_T2="no"
+    if [[ $vendor = *Apple* ]]; then
+        IS_APPLE="yes"
+        MAC_MODEL=$(trim "$product")
+        if has_apple_t2; then HAS_T2="yes"; fi
+    fi
     LIVE_BOOT_MODE=$BOOT_MODE
 
     IS_LAPTOP="no"
     if compgen -G "/sys/class/power_supply/BAT*" >/dev/null; then IS_LAPTOP="yes"; fi
-    case "$(cat /sys/class/dmi/id/chassis_type 2>/dev/null || echo 0)" in
+    case "$(cat /sys/class/dmi/id/chassis_type 2>/dev/null || printf '0')" in
         8|9|10|11|14|30|31|32) IS_LAPTOP="yes" ;;
     esac
+    if [[ $MAC_MODEL = MacBook* ]]; then IS_LAPTOP="yes"; fi
+    if [ "$VIRT" != "none" ]; then IS_LAPTOP="no"; fi
 
     HAS_WIFI="no"
     local n
     for n in /sys/class/net/*; do
-        if [[ -d $n/wireless || -e $n/phy80211 ]]; then HAS_WIFI="yes"; fi
+        if [ -d "$n/wireless" ] || [ -e "$n/phy80211" ]; then HAS_WIFI="yes"; fi
     done
+    detect_broadcom_wifi
+    # A Broadcom card that needs the wl driver has no network interface on the
+    # live system, but the new system can drive it.
+    if [ -n "$BCM_WIFI" ]; then HAS_WIFI="yes"; fi
 
     HAS_BT="no"
     if compgen -G "/sys/class/bluetooth/hci*" >/dev/null; then HAS_BT="yes"; fi
 
     detect_gpus
+    if [ "$VIRT" != "none" ]; then HYBRID_GPU="no"; fi
 }
 
 show_hardware() {
     section "Detected hardware"
     local b="" g fw vm
     fw="Legacy BIOS"
-    if [[ $BOOT_MODE == "uefi" ]]; then fw="UEFI (${UEFI_BITS:-64}-bit)"; fi
+    if [ "$BOOT_MODE" = "uefi" ]; then fw="UEFI (${UEFI_BITS:-64}-bit)"; fi
     vm="no (real hardware)"
-    if [[ $VIRT != "none" ]]; then vm="yes ($VIRT)"; fi
+    if [ "$VIRT" != "none" ]; then vm="yes ($VIRT)"; fi
     printf -v b '%s  %-22s %s\n' "$b" "CPU:" "${CPU_MODEL:-unknown} (${CPU_VENDOR:-unknown})"
     printf -v b '%s  %-22s %s\n' "$b" "CPU threads:" "$NPROC"
     printf -v b '%s  %-22s %s\n' "$b" "Memory:" "about ${RAM_GIB} GiB"
     printf -v b '%s  %-22s %s\n' "$b" "x86-64-v3 capable:" "$CPU_X86_64_V3 (AVX2 generation or newer)"
     printf -v b '%s  %-22s %s\n' "$b" "Firmware boot mode:" "$fw"
-    if [[ $BOOT_MODE == "uefi" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
         printf -v b '%s  %-22s %s\n' "$b" "Secure Boot:" "$SECURE_BOOT"
     fi
     printf -v b '%s  %-22s %s\n' "$b" "Virtual machine:" "$vm"
-    if [[ $IS_APPLE == "yes" ]]; then
+    if [ "$IS_APPLE" = "yes" ]; then
         printf -v b '%s  %-22s %s\n' "$b" "Apple Mac:" "${MAC_MODEL:-yes}"
     fi
     printf -v b '%s  %-22s %s\n' "$b" "Laptop:" "$IS_LAPTOP"
     printf -v b '%s  %-22s %s\n' "$b" "Wi-Fi adapter:" "$HAS_WIFI"
+    case "$BCM_WIFI" in
+        wl) printf -v b '%s  %-22s %s\n' "$b" "" "(Broadcom, needs the wl driver)" ;;
+        b43) printf -v b '%s  %-22s %s\n' "$b" "" "(Broadcom, needs b43 firmware)" ;;
+    esac
     printf -v b '%s  %-22s %s\n' "$b" "Bluetooth adapter:" "$HAS_BT"
-    if (( ${#GPU_NAMES[@]} == 0 )); then
+    if [ "${#GPU_NAMES[@]}" -eq 0 ]; then
         printf -v b '%s  %-22s %s\n' "$b" "Graphics:" "none detected"
     else
         for g in "${GPU_NAMES[@]}"; do
@@ -1098,14 +1271,22 @@ show_hardware() {
         done
     fi
     say_pre "${b%$'\n'}"
-    if [[ $BOOT_MODE == "uefi" && $UEFI_BITS == "32" ]]; then
-        die "This machine has 32-bit UEFI firmware, which this installer does not support. Boot the live image in legacy BIOS (CSM) mode instead, if the firmware allows it."
+    if [ "$BOOT_MODE" = "uefi" ] && [ "$UEFI_BITS" = "32" ]; then
+        if [ "$IS_APPLE" = "yes" ]; then
+            die "This Mac has 32-bit EFI firmware, which this installer cannot make bootable. Nothing on disk has been changed."
+        fi
+        say "This computer has 32-bit UEFI firmware with a 64-bit CPU (common on Intel Atom tablets and small laptops from around 2014). The installer uses GRUB's 32-bit EFI version for it, which starts the normal 64-bit Gentoo kernel. systemd-boot is not offered on this firmware."
     fi
-    if [[ $SECURE_BOOT == "on" ]]; then
+    if [ "$SECURE_BOOT" = "on" ]; then
         warn "Secure Boot is enabled in your firmware."
         say "This installer does not sign the kernel or bootloader, so the installed system will not boot while Secure Boot is on. Disable Secure Boot in the firmware setup before rebooting into Gentoo (you can set up signing later; see the Gentoo wiki page 'Secure Boot')."
     fi
-    if [[ $BOOT_MODE == "bios" && $IS_APPLE != "yes" ]]; then
+    if [ "$HAS_T2" = "yes" ]; then
+        warn "This Mac has an Apple T2 chip (most Macs from 2018 to 2020)."
+        say "Gentoo's kernel does not support the T2's built-in keyboard, trackpad, Wi-Fi, audio and Touch Bar; those need the patched kernel from the t2linux project. Use a USB keyboard and a wired or USB network connection, and expect those devices to stay off after installing until you set up the t2linux kernel (see wiki.t2linux.org)." \
+            "Also allow booting from external media and other operating systems: start the Mac holding Command+R, open Startup Security Utility, and set Secure Boot to 'No Security'."
+    fi
+    if [ "$BOOT_MODE" = "bios" ] && [ "$IS_APPLE" != "yes" ]; then
         say "The live image was started in legacy BIOS mode. If this computer supports UEFI (almost everything made after 2012 does), consider rebooting the live image in UEFI mode first: it is the more modern and better supported setup. Continuing in BIOS mode works too (GRUB is used)."
     fi
     pause
@@ -1124,31 +1305,34 @@ mac_has_32bit_efi() {
 
 # Intel Macs choose between legacy (BIOS) and EFI boot from the partition table:
 # they only boot a disk in legacy mode if it has an MBR (or hybrid MBR)
-# partition table with a partition marked bootable. This installer uses GPT, so
-# on a Mac a BIOS-mode installation does not boot (the Mac shows a flashing
-# folder). When the live system was started in BIOS mode on a Mac (Ventoy's EFI
-# mode does not start on some Macs, for example), install for EFI instead. The
-# bootloader then goes to the fallback path EFI/BOOT/BOOTX64.EFI, which works
-# without access to the firmware's boot menu from the live system.
+# partition table with a partition marked bootable. When the live system was
+# started in BIOS mode on a Mac (Ventoy's EFI mode does not start on some Macs,
+# for example), install for EFI instead. The bootloader then goes to the
+# fallback path EFI/BOOT/BOOTX64.EFI, which works without access to the
+# firmware's boot menu from the live system. A BIOS-mode install on a Mac gets
+# an MBR partition table, which the Mac's legacy boot needs.
 mac_boot_check() {
     local target
-    if [[ $IS_APPLE != "yes" || $BOOT_MODE != "bios" ]]; then return 0; fi
+    if [ "$IS_APPLE" != "yes" ] || [ "$BOOT_MODE" != "bios" ]; then return 0; fi
     section "Apple Mac started in BIOS mode"
     if mac_has_32bit_efi "$MAC_MODEL"; then
-        die "This Mac (${MAC_MODEL}) has 32-bit EFI firmware. This installer supports only 64-bit EFI, and Macs do not boot a BIOS-mode installation from a GPT disk, which is what this installer creates, so it cannot produce a system that boots on this Mac. Nothing on disk has been changed."
+        say "This Mac (${MAC_MODEL}) has 32-bit EFI firmware, which this installer cannot boot. It can still install in BIOS mode with an MBR partition table, which these Macs start through their legacy boot support."
+        PTABLE="mbr"
+        return 0
     fi
     say "This is an Apple Mac${MAC_MODEL:+ (${MAC_MODEL})}, and the live system was started in legacy BIOS mode. That is common with Ventoy, whose EFI mode does not start on some Macs." \
-        "Macs only boot a BIOS-mode installation from a disk with an MBR partition table. This installer uses a GPT partition table, so a BIOS-mode installation would not start: the Mac would show a flashing folder with a question mark." \
+        "Macs only boot a BIOS-mode installation from a disk with an MBR partition table, and the Mac's legacy boot is slow and lacks some features (for example, the screen brightness keys may not work)." \
         "Instead, the installer can set up the new system for EFI, the Mac's native boot mode, even though the live system runs in BIOS mode. The bootloader is then placed at the standard fallback location that the Mac finds by itself. If it does not start automatically, hold the Option key while the Mac starts and choose 'EFI Boot'."
     choose target "How should the new system start?" "uefi" \
         "uefi|Install for EFI, the Mac's native boot mode (recommended)" \
-        "bios|Install for BIOS anyway (the Mac will not start it without extra manual steps)"
-    if [[ $target == "uefi" ]]; then
+        "bios|Install for BIOS with an MBR partition table (legacy boot)"
+    if [ "$target" = "uefi" ]; then
         BOOT_MODE="uefi"
         UEFI_BITS="64"
         ok "The new system will be installed for EFI."
     else
-        warn "Installing for BIOS on a GPT disk: this Mac will not start it unless you add something like a hybrid MBR yourself."
+        PTABLE="mbr"
+        ok "The new system will be installed for BIOS, on an MBR partition table."
     fi
 }
 
@@ -1157,27 +1341,30 @@ live_media_disk() {
     local m src pk
     for m in /mnt/cdrom /run/initramfs/live /run/archiso/bootmnt /run/live/medium; do
         src=$(findmnt -no SOURCE "$m" 2>/dev/null || true)
-        [[ -n $src && -b $src ]] || continue
+        [ -n "$src" ] && [ -b "$src" ] || continue
         pk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -n1 || true)
-        if [[ -n $pk ]]; then echo "/dev/$pk"; else echo "$src"; fi
+        if [ -n "$pk" ]; then printf '/dev/%s\n' "$pk"; else printf '%s\n' "$src"; fi
         return 0
     done
     return 0
 }
 
+# Whole disks that can be installed to. Leaves out optical drives, RAM and
+# loop devices, eMMC boot and RPMB areas, read-only and empty devices.
 list_disks() {
-    lsblk -dpno NAME,TYPE 2>/dev/null | awk '$2=="disk" {print $1}' \
-        | grep -Ev '^/dev/(loop|sr|zram|ram|fd)' || true
+    LC_ALL=C lsblk -dpno NAME,TYPE,RO,SIZE -b 2>/dev/null \
+        | awk '$2 == "disk" && $3 == "0" && $4 > 0 {print $1}' \
+        | grep -Ev '^/dev/(loop|sr|zram|ram|fd|nbd)|^/dev/mmcblk[0-9]+(boot[0-9]+|rpmb)$' || true
 }
 
 # part_dev DISK N -> partition device path (handles nvme0n1p1, mmcblk0p1, sda1)
 part_dev() {
-    if [[ $1 =~ [0-9]$ ]]; then echo "${1}p${2}"; else echo "${1}${2}"; fi
+    if [[ $1 =~ [0-9]$ ]]; then printf '%sp%s\n' "$1" "$2"; else printf '%s%s\n' "$1" "$2"; fi
 }
 
 lsblk_field() {
     # lsblk_field FIELD DEVICE
-    lsblk -dno "$1" "$2" 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
+    LC_ALL=C lsblk -dno "$1" "$2" 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
 }
 
 # ----------------------------------------------------------------------------
@@ -1185,24 +1372,24 @@ lsblk_field() {
 # ----------------------------------------------------------------------------
 de_label() {
     case "$1" in
-        plasma) echo "KDE Plasma" ;;
-        gnome) echo "GNOME" ;;
-        cinnamon) echo "Cinnamon" ;;
-        xfce) echo "Xfce" ;;
-        mate) echo "MATE" ;;
-        lxqt) echo "LXQt" ;;
-        sway) echo "Sway" ;;
-        i3) echo "i3" ;;
-        *) echo "No desktop (console only)" ;;
+        plasma) printf '%s\n' "KDE Plasma" ;;
+        gnome) printf '%s\n' "GNOME" ;;
+        cinnamon) printf '%s\n' "Cinnamon" ;;
+        xfce) printf '%s\n' "Xfce" ;;
+        mate) printf '%s\n' "MATE" ;;
+        lxqt) printf '%s\n' "LXQt" ;;
+        sway) printf '%s\n' "Sway" ;;
+        i3) printf '%s\n' "i3" ;;
+        *) printf '%s\n' "No desktop (console only)" ;;
     esac
 }
 
 default_dm_for() {
     case "$1" in
-        plasma|lxqt) echo "sddm" ;;
-        gnome) echo "gdm" ;;
-        xfce|cinnamon|mate|i3) echo "lightdm" ;;
-        *) echo "none" ;;
+        plasma|lxqt) printf '%s\n' "sddm" ;;
+        gnome) printf '%s\n' "gdm" ;;
+        xfce|cinnamon|mate|i3) printf '%s\n' "lightdm" ;;
+        *) printf '%s\n' "none" ;;
     esac
 }
 
@@ -1227,13 +1414,13 @@ q_system_type() {
     def_sway=$(yn_default SWAY_AUTOSTART y)
     DM="none"
     SWAY_AUTOSTART="no"
-    if [[ $DE == "sway" ]]; then
+    if [ "$DE" = "sway" ]; then
         say "Sway is started from the text console instead of a graphical login screen. The installer can start it automatically when your user logs in on the first console (tty1), which is the usual setup."
         ask_yn SWAY_AUTOSTART "Start Sway automatically after logging in on tty1?" "$def_sway"
-    elif [[ $DE != "none" ]]; then
+    elif [ "$DE" != "none" ]; then
         local def_dm def_yn="y"
         def_dm=$(default_dm_for "$DE")
-        if [[ $DE == "$prev_de" && $prev_dm == "none" ]]; then def_yn="n"; fi
+        if [ "$DE" = "$prev_de" ] && [ "$prev_dm" = "none" ]; then def_yn="n"; fi
         say "A display manager is the graphical login screen shown at boot. For $(de_label "$DE") the installer uses ${def_dm}. Without one, you log in on a text console and start the desktop yourself."
         if yesno "Install the graphical login screen (${def_dm})?" "$def_yn"; then DM=$def_dm; fi
     fi
@@ -1243,12 +1430,12 @@ q_system_type() {
         "OpenRC is Gentoo's traditional default: simple, script based and lightweight. systemd is what most other distributions use and brings more integrated tooling (journald logs, timers, per-user services). Both are fully supported by Gentoo." \
         "Gentoo announced its binary package host with desktop packages built for the Plasma/systemd and GNOME/systemd profiles, so for those two desktops systemd is likely to get more ready-made binaries and less compiling."
     local def_init="openrc"
-    if [[ $DE == "plasma" || $DE == "gnome" ]]; then def_init="systemd"; fi
-    if [[ $DE == "$prev_de" && -n $INIT ]]; then def_init=$INIT; fi
+    if [ "$DE" = "plasma" ] || [ "$DE" = "gnome" ]; then def_init="systemd"; fi
+    if [ "$DE" = "$prev_de" ] && [ -n "$INIT" ]; then def_init=$INIT; fi
     choose INIT "Init system" "$def_init" \
         "openrc|OpenRC: Gentoo's traditional init system" \
         "systemd|systemd: the init system used by most distributions"
-    if [[ $DE == "gnome" && $INIT == "openrc" ]]; then
+    if [ "$DE" = "gnome" ] && [ "$INIT" = "openrc" ]; then
         warn "GNOME is developed against systemd. On OpenRC it runs through elogind and works, but some features (for example parts of the Settings panels) may be limited."
         if yesno "Switch to systemd for GNOME?" y; then INIT="systemd"; fi
     fi
@@ -1259,14 +1446,14 @@ q_system_type() {
         "Recommended: yes. You can switch to building everything from source at any time later."
     ask_yn USE_BINPKG "Use Gentoo's official binary packages?" "$(yn_default USE_BINPKG y)"
     BINHOST_V3="no"
-    if [[ $USE_BINPKG == "yes" && $CPU_X86_64_V3 == "yes" ]]; then
+    if [ "$USE_BINPKG" = "yes" ] && [ "$CPU_X86_64_V3" = "yes" ]; then
         BINHOST_V3="yes"
         info "Your CPU supports x86-64-v3 (AVX2 generation), so x86-64-v3 binaries will be preferred, with baseline x86-64 as the fallback."
     fi
 
     subsection "CPU instruction set flags"
     say "CPU_FLAGS_X86 tells packages which instruction set extensions (SSE4.2, AVX2, AES and so on) they may use. The Handbook recommends detecting the exact set of this CPU with the cpuid2cpuflags tool, and the installer can do that."
-    if [[ $USE_BINPKG == "yes" ]]; then
+    if [ "$USE_BINPKG" = "yes" ]; then
         say "Trade-off with binary packages: Portage only uses a binary when its flags match yours. Packages that use CPU_FLAGS_X86 (mostly media codecs, crypto and maths libraries) will therefore be compiled locally when this CPU's set differs from what the binaries were built with. You get code tuned to this CPU at the cost of extra compile time."
     fi
     ask_yn TUNE_CPU_FLAGS "Detect and use this CPU's exact instruction set flags?" "$(yn_default TUNE_CPU_FLAGS y)"
@@ -1283,9 +1470,9 @@ q_disk() {
     local live d size model tran
     local -a opts=()
     live=$(live_media_disk)
-    while read -r d; do
-        [[ -n $d ]] || continue
-        if [[ $d == "$live" ]]; then
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        if [ "$d" = "$live" ]; then
             info "Skipping ${d}: the live image was booted from it."
             continue
         fi
@@ -1294,7 +1481,10 @@ q_disk() {
         tran=$(lsblk_field TRAN "$d")
         opts+=("${d}|${d}   ${size}   ${model:-unknown model}${tran:+   (${tran})}")
     done < <(list_disks)
-    if (( ${#opts[@]} == 0 )); then
+    if [ "${#opts[@]}" -eq 0 ]; then
+        if has_raid_controller; then
+            die "No usable disks were found, but this computer has a RAID controller. Many laptops and desktops ship with the disk controller set to 'RAID', 'Intel RST' or 'VMD' mode, which hides the disks from Linux. Switch it to 'AHCI' (and turn VMD off) in the firmware setup. If Windows is installed on this computer, read how to switch it safely first, or Windows may stop booting."
+        fi
         die "No usable disks were found. Check that the disk is connected and visible in 'lsblk'."
     fi
     say "Pick the disk to install Gentoo on. Double check the size and model: the wrong choice can destroy data on another disk."
@@ -1306,29 +1496,29 @@ q_disk() {
         bytes=${bytes%%$'\n'*}
         gib=$(( ${bytes:-0} / 1073741824 ))
         if (( gib >= need )); then break; fi
-        warn "${DISK} has ${gib} GiB, but this installation needs at least ${need} GiB ($( [[ $DE == none ]] && echo "without a desktop" || echo "with a desktop: the desktop, the package downloads and temporary build files need the room" )). Pick another disk, or quit and give the machine a larger disk."
+        warn "${DISK} has ${gib} GiB, but this installation needs at least ${need} GiB ($( [ "$DE" = none ] && printf '%s\n' "without a desktop" || printf '%s\n' "with a desktop: the desktop, the package downloads and temporary build files need the room" )). Pick another disk, or quit and give the machine a larger disk."
     done
 
     say_pre "$(printf '  Current contents of %s:\n' "$DISK"; lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null | sed 's/^/    /')"
-    if (( gib < 60 )) && [[ $DE != "none" ]]; then
+    if (( gib < 60 )) && [ "$DE" != "none" ]; then
         info "${DISK} has ${gib} GiB. That is enough to install, but 60 GiB or more leaves comfortable room for updates, which on Gentoo sometimes compile large packages."
     fi
     IS_SSD="no"
-    if [[ $(cat "/sys/block/${DISK##*/}/queue/rotational" 2>/dev/null || echo 1) == "0" ]]; then IS_SSD="yes"; fi
+    if [ "$(cat "/sys/block/${DISK##*/}/queue/rotational" 2>/dev/null || printf '%s\n' 1)" = "0" ]; then IS_SSD="yes"; fi
 }
 
 # Minimum size in GiB for the target disk or root partition.
 min_root_gib() {
-    if [[ $DE == "none" ]]; then echo "$MIN_DISK_GIB"; else echo "$MIN_DESKTOP_DISK_GIB"; fi
+    if [ "$DE" = "none" ]; then printf '%s\n' "$MIN_DISK_GIB"; else printf '%s\n' "$MIN_DESKTOP_DISK_GIB"; fi
 }
 
 # Size in GiB of the disk (automatic layout) or root partition (manual layout).
 target_root_gib() {
     local dev=$DISK bytes
-    if [[ $PART_MODE == "manual" ]]; then dev=$ROOT_PART; fi
+    if [ "$PART_MODE" = "manual" ]; then dev=$ROOT_PART; fi
     bytes=$(lsblk -bdno SIZE "$dev" 2>/dev/null || true)
     bytes=${bytes%%$'\n'*}
-    echo $(( ${bytes:-0} / 1073741824 ))
+    printf '%s\n' $(( ${bytes:-0} / 1073741824 ))
 }
 
 q_part_mode() {
@@ -1337,6 +1527,29 @@ q_part_mode() {
     choose PART_MODE "Partitioning" "${PART_MODE:-auto}" \
         "auto|Erase the whole disk and partition it automatically (recommended)" \
         "manual|Use partitions I choose (dual boot or custom layout)"
+}
+
+# Partition table for the automatic layout. UEFI always uses GPT. In BIOS mode
+# GPT works on nearly every computer, but some older BIOSes refuse to start
+# from a GPT disk, and Macs only start BIOS-mode systems from an MBR disk.
+q_partition_table() {
+    local gib
+    if [ "$BOOT_MODE" = "uefi" ]; then PTABLE="gpt"; return 0; fi
+    if [ "$PART_MODE" = "manual" ]; then return 0; fi
+    gib=$(target_root_gib)
+    if [ "$IS_APPLE" = "yes" ] && [ "$gib" -lt 2048 ]; then
+        PTABLE="mbr"
+        info "Apple Mac in BIOS mode: the disk gets an MBR partition table, which the Mac's legacy boot needs."
+        return 0
+    fi
+    if [ "$gib" -ge 2048 ]; then
+        PTABLE="gpt"
+        return 0
+    fi
+    say "GPT is the modern partition table and works with nearly every BIOS. MBR is the older format: pick it only if this computer's BIOS does not start from a GPT disk (some machines from before about 2010 do not). MBR is limited to disks of 2 TiB."
+    choose PTABLE "Partition table" "${PTABLE:-gpt}" \
+        "gpt|GPT (recommended)" \
+        "mbr|MBR (for old BIOSes that do not boot GPT disks)"
 }
 
 q_filesystem() {
@@ -1360,7 +1573,7 @@ q_encryption() {
         "If you forget the passphrase, the data is gone for good. Nobody can recover it." \
         "Keyboard note: the passphrase prompt at boot may use the US layout. A passphrase made of letters, digits and spaces that sit in the same place on a US keyboard is the safest choice if your layout is different."
     ask_yn ENCRYPT "Encrypt the root partition?" "$def"
-    if [[ $ENCRYPT == "yes" ]]; then
+    if [ "$ENCRYPT" = "yes" ]; then
         ask_password LUKS_PASSWORD "disk encryption passphrase" 8
     fi
 }
@@ -1371,7 +1584,7 @@ q_swap() {
         "zram (recommended) creates compressed swap inside RAM. It is fast, uses no disk space, and fits desktops well. Its size will be ${ram_cap} GiB (equal to RAM, capped at 8 GiB, the same rule Fedora uses); it only consumes memory for what is actually swapped." \
         "A swap partition uses disk space. Hibernation needs one, but this installer does not set up hibernation."
     local -a opts=("zram|zram: compressed swap in RAM (recommended)")
-    if [[ $ENCRYPT == "yes" ]]; then
+    if [ "$ENCRYPT" = "yes" ]; then
         info "A swap partition is not offered with encryption: an unencrypted swap partition could leak the contents of memory to disk."
     else
         opts+=("partition|A swap partition on the disk")
@@ -1380,15 +1593,20 @@ q_swap() {
     choose SWAP_MODE "Swap" "${SWAP_MODE:-zram}" "${opts[@]}"
     local prev_size=$SWAP_SIZE_GIB
     SWAP_SIZE_GIB=""
-    if [[ $SWAP_MODE == "partition" && $PART_MODE == "auto" ]]; then
+    if [ "$SWAP_MODE" = "partition" ] && [ "$PART_MODE" = "auto" ]; then
         ask SWAP_SIZE_GIB "Swap partition size in GiB" "${prev_size:-$ram_cap}" valid_positive_int
     fi
 }
 
 q_bootloader() {
-    if [[ $BOOT_MODE == "bios" ]]; then
+    if [ "$BOOT_MODE" = "bios" ]; then
         BOOTLOADER="grub"
         info "Legacy BIOS mode: the GRUB bootloader will be used."
+        return 0
+    fi
+    if [ "$UEFI_BITS" = "32" ]; then
+        BOOTLOADER="grub"
+        info "32-bit UEFI firmware: the GRUB bootloader (32-bit EFI version) will be used."
         return 0
     fi
     say "The bootloader shows the boot menu and starts the kernel." \
@@ -1405,11 +1623,11 @@ pick_partition() {
     local __live name size fstype ptype label pk
     local -a __opts=()
     __live=$(live_media_disk)
-    while read -r name; do
-        [[ -n $name ]] || continue
-        if [[ " $__used " == *" $name "* ]]; then continue; fi
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        if [[ " $__used " = *" $name "* ]]; then continue; fi
         pk=$(lsblk_field PKNAME "$name")
-        if [[ -n $__live && "/dev/$pk" == "$__live" ]]; then continue; fi
+        if [ -n "$__live" ] && [ "/dev/$pk" = "$__live" ]; then continue; fi
         size=$(lsblk_field SIZE "$name")
         fstype=$(lsblk_field FSTYPE "$name")
         ptype=$(lsblk_field PARTTYPENAME "$name")
@@ -1428,16 +1646,16 @@ pick_partition() {
 
 q_manual_partitions() {
     local -a req=()
-    if [[ $BOOT_MODE == "uefi" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
         req+=("An EFI system partition (FAT32). An existing one, for example from Windows, can be reused without formatting. With systemd-boot it holds the kernels, so 1 GiB is recommended.")
     else
-        req+=("On a GPT disk: a 1 MiB partition of type 'BIOS boot' on the disk that holds the root partition (GRUB stores itself there).")
+        req+=("On a GPT disk: a 1 MiB partition of type 'BIOS boot' on the disk that holds the root partition (GRUB stores itself there). An MBR disk needs no extra partition, but leave 1 MiB free before the first partition (cfdisk does that by default).")
     fi
-    if [[ $NEED_BOOT_PART == "yes" ]]; then
-        req+=("A separate /boot partition of at least 512 MiB (1 GiB recommended). It will be formatted as ext4, because GRUB cannot read the root filesystem you chose ($( [[ $ENCRYPT == yes ]] && echo "encrypted" || echo "XFS with current default features" )).")
+    if [ "$NEED_BOOT_PART" = "yes" ]; then
+        req+=("A separate /boot partition of at least 512 MiB (1 GiB recommended). It will be formatted as ext4, because GRUB cannot read the root filesystem you chose ($( [ "$ENCRYPT" = yes ] && printf '%s\n' "encrypted" || printf '%s\n' "XFS with current default features" )).")
     fi
     req+=("A root partition of at least ${MIN_DISK_GIB} GiB (40 GiB or more for a desktop). It will be formatted.")
-    if [[ $SWAP_MODE == "partition" ]]; then req+=("A swap partition. It will be formatted as swap."); fi
+    if [ "$SWAP_MODE" = "partition" ]; then req+=("A swap partition. It will be formatted as swap."); fi
 
     say "Manual partitioning. You need:"
     local r
@@ -1454,14 +1672,14 @@ q_manual_partitions() {
 
     local used="" fstype bytes prev_esp=$ESP_PART
     ESP_PART=""; BOOT_PART=""; SWAP_PART=""; BIOS_PART=""; FORMAT_ESP="no"
-    if [[ $BOOT_MODE == "uefi" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
         pick_partition ESP_PART "Which partition is the EFI system partition?" "$used"
         used+=" $ESP_PART"
         fstype=$(lsblk_field FSTYPE "$ESP_PART")
-        if [[ $fstype == "vfat" ]]; then
+        if [ "$fstype" = "vfat" ]; then
             say "${ESP_PART} already contains a FAT filesystem. If another operating system boots from it (Windows, another Linux), keep it: Gentoo's boot files are simply added next to the existing ones."
             local def_fmt="n"
-            if [[ $FORMAT_ESP == "yes" && $ESP_PART == "$prev_esp" ]]; then def_fmt="y"; fi
+            if [ "$FORMAT_ESP" = "yes" ] && [ "$ESP_PART" = "$prev_esp" ]; then def_fmt="y"; fi
             ask_yn FORMAT_ESP "Format ${ESP_PART}? (answer no to keep the existing boot files)" "$def_fmt"
         else
             warn "${ESP_PART} has no FAT filesystem, so it will be formatted as FAT32."
@@ -1471,11 +1689,11 @@ q_manual_partitions() {
         bytes=${bytes%%$'\n'*}
         if (( bytes < 300 * 1048576 )); then
             warn "${ESP_PART} is smaller than 300 MiB. That is too small for kernels and may even be tight for GRUB."
-        elif [[ $BOOTLOADER == "systemd-boot" ]] && (( bytes < 900 * 1048576 )); then
+        elif [ "$BOOTLOADER" = "systemd-boot" ] && (( bytes < 900 * 1048576 )); then
             warn "With systemd-boot, kernels and initramfs images live on the EFI partition. ${ESP_PART} holds only room for one or two kernels; consider GRUB instead."
         fi
     fi
-    if [[ $NEED_BOOT_PART == "yes" ]]; then
+    if [ "$NEED_BOOT_PART" = "yes" ]; then
         pick_partition BOOT_PART "Which partition should become /boot? (it will be formatted as ext4)" "$used"
         used+=" $BOOT_PART"
     fi
@@ -1489,7 +1707,7 @@ q_manual_partitions() {
         warn "${ROOT_PART} has $(( ${bytes:-0} / 1073741824 )) GiB; this installation needs at least ${need} GiB for the root filesystem. Pick a larger partition (or enlarge it with cfdisk and run the installer again)."
     done
     used+=" $ROOT_PART"
-    if [[ $SWAP_MODE == "partition" ]]; then
+    if [ "$SWAP_MODE" = "partition" ]; then
         pick_partition SWAP_PART "Which partition should be used as swap? (it will be formatted)" "$used"
         used+=" $SWAP_PART"
     fi
@@ -1497,9 +1715,9 @@ q_manual_partitions() {
 
     DISK="/dev/$(lsblk_field PKNAME "$ROOT_PART")"
     GRUB_DISK=""
-    if [[ $BOOT_MODE == "bios" ]]; then
+    if [ "$BOOT_MODE" = "bios" ]; then
         GRUB_DISK=$DISK
-        if [[ $(lsblk_field PTTYPE "$GRUB_DISK") == "gpt" ]]; then
+        if [ "$(lsblk_field PTTYPE "$GRUB_DISK")" = "gpt" ]; then
             local ptypes
             ptypes=$(lsblk -lno PARTTYPE "$GRUB_DISK" 2>/dev/null || true)
             if ! grep -qi "${GUID_BIOS}" <<<"$ptypes"; then
@@ -1507,28 +1725,35 @@ q_manual_partitions() {
             fi
         fi
     fi
+    PTABLE="gpt"
+    if [ "$(lsblk_field PTTYPE "$DISK")" = "dos" ]; then PTABLE="mbr"; fi
     DUAL_BOOT="yes"
     IS_SSD="no"
-    if [[ $(cat "/sys/block/${DISK##*/}/queue/rotational" 2>/dev/null || echo 1) == "0" ]]; then IS_SSD="yes"; fi
+    if [ "$(cat "/sys/block/${DISK##*/}/queue/rotational" 2>/dev/null || printf '%s\n' 1)" = "0" ]; then IS_SSD="yes"; fi
 }
 
 show_auto_layout() {
     local n=1 fsdesc b
     fsdesc="$FS"
-    if [[ $ENCRYPT == "yes" ]]; then fsdesc="$FS inside LUKS2 encryption"; fi
-    if [[ $FS == "btrfs" ]]; then fsdesc+=", subvolumes @ (/) and @home (/home)"; fi
-    b="  Planned layout for ${DISK} (GPT partition table):"$'\n'
-    if [[ $BOOT_MODE == "uefi" ]]; then
-        printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 GiB" "EFI system partition, FAT32, mounted at /efi"
+    if [ "$ENCRYPT" = "yes" ]; then fsdesc="$FS inside LUKS2 encryption"; fi
+    if [ "$FS" = "btrfs" ]; then fsdesc+=", subvolumes @ (/) and @home (/home)"; fi
+    if [ "$PTABLE" = "mbr" ]; then
+        b="  Planned layout for ${DISK} (MBR partition table):"$'\n'
     else
-        printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 MiB" "BIOS boot partition (used by GRUB, no filesystem)"
+        b="  Planned layout for ${DISK} (GPT partition table):"$'\n'
     fi
-    n=$(( n + 1 ))
-    if [[ $NEED_BOOT_PART == "yes" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 GiB" "EFI system partition, FAT32, mounted at /efi"
+        n=$(( n + 1 ))
+    elif [ "$PTABLE" = "gpt" ]; then
+        printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 MiB" "BIOS boot partition (used by GRUB, no filesystem)"
+        n=$(( n + 1 ))
+    fi
+    if [ "$NEED_BOOT_PART" = "yes" ]; then
         printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "1 GiB" "boot partition, ext4, mounted at /boot"
         n=$(( n + 1 ))
     fi
-    if [[ $SWAP_MODE == "partition" ]]; then
+    if [ "$SWAP_MODE" = "partition" ]; then
         printf -v b '%s    %s   %-9s %s\n' "$b" "$(part_dev "$DISK" $n)" "${SWAP_SIZE_GIB} GiB" "swap"
         n=$(( n + 1 ))
     fi
@@ -1543,18 +1768,19 @@ q_disk_layout() {
     section "Part 2 of 6: Disk and filesystems"
     q_disk
     q_part_mode
+    q_partition_table
     q_filesystem
     q_encryption
     q_swap
     q_bootloader
     NEED_BOOT_PART="no"
-    if [[ $BOOTLOADER == "grub" ]] && [[ $ENCRYPT == "yes" || $FS == "xfs" ]]; then
+    if [ "$BOOTLOADER" = "grub" ] && { [ "$ENCRYPT" = "yes" ] || [ "$FS" = "xfs" ]; }; then
         NEED_BOOT_PART="yes"
-        if [[ $FS == "xfs" && $ENCRYPT == "no" ]]; then
+        if [ "$FS" = "xfs" ] && [ "$ENCRYPT" = "no" ]; then
             info "GRUB plus XFS: a separate ext4 /boot partition is used, because GRUB may not read XFS filesystems created with the newest default features."
         fi
     fi
-    if [[ $PART_MODE == "manual" ]]; then
+    if [ "$PART_MODE" = "manual" ]; then
         q_manual_partitions
     else
         show_auto_layout
@@ -1589,7 +1815,7 @@ xkb_from_keymap() {
     esac
 }
 
-ask_timezone() {
+cli_ask_timezone() {
     say "The timezone sets your local time. Use the Region/City form, for example America/New_York, Europe/London or Asia/Tokyo. Type 'list' to browse."
     ask TIMEZONE "Timezone" "${TIMEZONE:-UTC}" valid_timezone
 }
@@ -1609,16 +1835,16 @@ q_region() {
     local prev_keymap=$KEYMAP prev_xkb=$XKB_LAYOUT prev_var=$XKB_VARIANT
     ask KEYMAP "Console keymap" "${KEYMAP:-us}" valid_keymap
 
-    if [[ $DE != "none" ]]; then
+    if [ "$DE" != "none" ]; then
         xkb_from_keymap "$KEYMAP"
-        if [[ $KEYMAP == "$prev_keymap" && -n $prev_xkb ]]; then
+        if [ "$KEYMAP" = "$prev_keymap" ] && [ -n "$prev_xkb" ]; then
             XKB_LAYOUT=$prev_xkb
             XKB_VARIANT=$prev_var
         fi
         say "The graphical keyboard layout (XKB) is used by the desktop. It is derived from your console keymap. Plasma and GNOME also let you change it later in their settings."
         local def=$XKB_LAYOUT
         ask XKB_LAYOUT "Desktop keyboard layout (XKB name, for example us, gb, de, fr)" "$def" valid_xkb_layout
-        if [[ $XKB_LAYOUT != "$def" ]]; then XKB_VARIANT=""; fi
+        if [ "$XKB_LAYOUT" != "$def" ]; then XKB_VARIANT=""; fi
     fi
 }
 
@@ -1642,7 +1868,7 @@ q_accounts() {
     case "$USER_SHELL" in
         fish|nushell)
             say "$(shell_field "$USER_SHELL" 4 | cut -d' ' -f1) is not a POSIX shell: commands copied from guides sometimes need changes. It also does not read /etc/profile, so environment settings that Gentoo packages add there (for example extra PATH entries) are missing in its login sessions unless you add them to its own configuration. It is written in Rust and is compiled from source if no binary package is available, which can take a while."
-            if [[ $USER_SHELL == "nushell" && $DE == "sway" ]]; then
+            if [ "$USER_SHELL" = "nushell" ] && [ "$DE" = "sway" ]; then
                 say "Sway is not started automatically after login with Nushell. Type 'sway' after logging in on the first console."
             fi
             ;;
@@ -1658,12 +1884,12 @@ q_accounts() {
 
 compute_video_cards() {
     local vc=""
-    if [[ $HAS_INTEL == "yes" ]]; then vc+=" intel"; fi
-    if [[ $HAS_AMD == "yes" ]]; then vc+=" amdgpu radeonsi"; fi
-    if [[ $HAS_NVIDIA == "yes" ]]; then
-        if [[ $GPU_DRIVER == "nvidia" ]]; then vc+=" nvidia"; else vc+=" nouveau"; fi
+    if [ "$HAS_INTEL" = "yes" ]; then vc+=" intel"; fi
+    if [ "$HAS_AMD" = "yes" ]; then vc+=" amdgpu radeonsi"; fi
+    if [ "$HAS_NVIDIA" = "yes" ]; then
+        if [ "$GPU_DRIVER" = "nvidia" ]; then vc+=" nvidia"; else vc+=" nouveau"; fi
     fi
-    if [[ -n $GPU_VM ]]; then vc+=" $GPU_VM"; fi
+    if [ -n "$GPU_VM" ]; then vc+=" $GPU_VM"; fi
     VIDEO_CARDS=$(trim "$vc")
 }
 
@@ -1671,9 +1897,9 @@ q_hardware_network() {
     section "Part 5 of 6: Drivers, network and services"
 
     local prev_gpu=$GPU_DRIVER def_gpu="nvidia"
-    if [[ $prev_gpu == "nouveau" ]]; then def_gpu="nouveau"; fi
+    if [ "$prev_gpu" = "nouveau" ]; then def_gpu="nouveau"; fi
     GPU_DRIVER="mesa"
-    if [[ $HAS_NVIDIA == "yes" ]]; then
+    if [ "$HAS_NVIDIA" = "yes" ]; then
         case "$NVIDIA_GEN" in
             unsupported)
                 say "An older NVIDIA graphics card was detected (Kepler generation or earlier, such as most GeForce GTX 600 and 700 series cards)." \
@@ -1700,47 +1926,96 @@ q_hardware_network() {
         esac
     fi
     compute_video_cards
-    if [[ -n $VIDEO_CARDS ]]; then
+    if [ -n "$VIDEO_CARDS" ]; then
         info "Graphics drivers (VIDEO_CARDS) set from the detected hardware: ${VIDEO_CARDS}"
     else
         warn "No known graphics hardware was detected, so VIDEO_CARDS is left empty (a basic framebuffer driver will be used)."
     fi
-    if [[ $HAS_AMD == "yes" ]]; then
+    if [ "$HAS_AMD" = "yes" ]; then
         say "Note: amdgpu/radeonsi covers AMD cards from the GCN generation (Radeon HD 7000, 2012) onward. For older Radeon cards, add 'radeon r600' to VIDEO_CARDS in /etc/portage/make.conf after installing."
     fi
 
     subsection "Networking"
     local def_net="networkmanager"
-    if [[ $DE == "none" && $HAS_WIFI == "no" ]]; then def_net="dhcpcd"; fi
+    if [ "$DE" = "none" ] && [ "$HAS_WIFI" = "no" ]; then def_net="dhcpcd"; fi
     say "This decides how the installed system connects to the network."
     local -a nopts=("networkmanager|NetworkManager: wired and Wi-Fi, a network icon in desktops, 'nmtui' in a terminal (recommended)"
                     "dhcpcd|dhcpcd: minimal, for wired Ethernet only (no Wi-Fi setup)")
-    if [[ $INIT == "systemd" ]]; then
+    if [ "$INIT" = "systemd" ]; then
         nopts+=("networkd|systemd-networkd: built into systemd, for wired Ethernet only")
     fi
     choose NET_TOOL "Network manager" "${NET_TOOL:-$def_net}" "${nopts[@]}"
-    if [[ $HAS_WIFI == "yes" && $NET_TOOL != "networkmanager" ]]; then
+    if [ "$HAS_WIFI" = "yes" ] && [ "$NET_TOOL" != "networkmanager" ]; then
         warn "This machine has Wi-Fi, but ${NET_TOOL} as configured here only handles wired connections. You would have to set up Wi-Fi yourself after installing."
     fi
 
     subsection "Other hardware and services"
     local def_bt="n"
-    if [[ $HAS_BT == "yes" ]]; then def_bt="y"; fi
-    say "Bluetooth support installs BlueZ and enables its service$( [[ $HAS_BT == yes ]] && echo " (a Bluetooth adapter was detected)" )."
+    if [ "$HAS_BT" = "yes" ]; then def_bt="y"; fi
+    say "Bluetooth support installs BlueZ and enables its service$( [ "$HAS_BT" = yes ] && printf '%s\n' " (a Bluetooth adapter was detected)" )."
     ask_yn WANT_BT "Install Bluetooth support?" "$(yn_default WANT_BT "$def_bt")"
 
     local def_cups
     def_cups=$(yn_default WANT_CUPS n)
     WANT_CUPS="no"
-    if [[ $DE != "none" ]]; then
+    if [ "$DE" != "none" ]; then
         say "CUPS is the printing system. Only needed if you print from this computer."
         ask_yn WANT_CUPS "Install printer support (CUPS)?" "$def_cups"
     fi
 
     local def_ssh="n"
-    if [[ $DE == "none" ]]; then def_ssh="y"; fi
+    if [ "$DE" = "none" ]; then def_ssh="y"; fi
     say "An SSH server lets you log in to this machine remotely over the network. Useful for servers; not needed on a typical desktop."
     ask_yn WANT_SSH "Enable the SSH server?" "$(yn_default WANT_SSH "$def_ssh")"
+
+    q_special_hardware
+}
+
+# Questions that only appear on hardware that needs them: Broadcom Wi-Fi,
+# laptop power management and Mac fan control.
+q_special_hardware() {
+    local def
+    def=$(yn_default WANT_BCM_WL y)
+    WANT_BCM_WL="no"
+    if [ "$BCM_WIFI" = "wl" ] && [ "$VIRT" = "none" ]; then
+        subsection "Broadcom Wi-Fi"
+        say "This computer's Broadcom Wi-Fi card (BCM4360, BCM4352, BCM43142 or BCM43228, found in most Macs from 2013 on and some PC laptops) only works with Broadcom's own 'wl' driver." \
+            "Gentoo packages it as net-wireless/broadcom-sta. It is proprietary, and Gentoo only has a testing (~amd64) version of it, because Broadcom stopped maintaining it years ago and it depends on community patches to build against new kernels. The installer would accept that one package's testing version and its Broadcom licence. It is compiled for the installed kernel and rebuilt automatically when the kernel updates." \
+            "Without it this card does not work; a USB Wi-Fi adapter or a wired connection works instead."
+        ask_yn WANT_BCM_WL "Install the Broadcom wl Wi-Fi driver?" "$def"
+    elif [ "$BCM_WIFI" = "b43" ] && [ "$VIRT" = "none" ]; then
+        info "Broadcom Wi-Fi card found that uses the b43 driver: its firmware (sys-firmware/b43-firmware) will be installed."
+    fi
+
+    def=$(yn_default WANT_POWER y)
+    WANT_POWER="no"
+    POWER_TOOL=""
+    if [ "$IS_LAPTOP" = "yes" ]; then
+        subsection "Laptop power management"
+        case "$DE" in
+            plasma|gnome)
+                POWER_TOOL="ppd"
+                say "power-profiles-daemon lets you switch between power saving, balanced and performance modes from $(de_label "$DE")'s battery menu. It is what $(de_label "$DE") is built to use." ;;
+            *)
+                POWER_TOOL="tlp"
+                say "TLP applies power saving settings automatically (CPU, disks, Wi-Fi, USB, PCIe), with separate settings on battery and on mains power. It runs on its own after boot; its settings are in /etc/tlp.conf." ;;
+        esac
+        if [ "$CPU_VENDOR" = "GenuineIntel" ]; then
+            say "On Intel CPUs, thermald is installed too: it keeps the CPU from overheating by managing its power limits before the firmware has to throttle it hard."
+        fi
+        ask_yn WANT_POWER "Set up laptop power management?" "$def"
+    fi
+
+    def="n"
+    if [[ $MAC_MODEL = MacBook* ]]; then def="y"; fi
+    def=$(yn_default WANT_MBPFAN "$def")
+    WANT_MBPFAN="no"
+    if [ "$IS_APPLE" = "yes" ] && [ "$VIRT" = "none" ]; then
+        subsection "Mac fan control"
+        say "Linux does not control the fans of Intel Macs by itself, so they stay slow while the CPU heats up. mbpfan reads the temperature sensors and sets the fan speed (made for MacBook, MacBook Air and MacBook Pro models; it works on many other Intel Macs too)." \
+            "Gentoo only has a testing (~amd64) version of app-laptop/mbpfan. The installer would accept that one package's testing version and enable the service."
+        ask_yn WANT_MBPFAN "Install mbpfan for fan control?" "$def"
+    fi
 }
 
 NATIVE_GUI_APPS=(
@@ -1753,6 +2028,7 @@ NATIVE_GUI_APPS=(
     "media-gfx/gimp|GIMP image editor"
     "media-gfx/inkscape|Inkscape vector graphics editor"
     "media-sound/audacity|Audacity audio editor"
+    "app-admin/keepassxc|KeePassXC password manager"
     "net-p2p/qbittorrent|qBittorrent BitTorrent client"
 )
 NATIVE_CLI_APPS=(
@@ -1803,16 +2079,16 @@ q_software() {
     say "Packages are downloaded from Gentoo's global mirror network (a CDN), which is fast almost everywhere. You can instead pick specific mirrors with mirrorselect." 
     local -a mopts=("cdn|Gentoo's global CDN (recommended)")
     local mirror_mode def_mirror="cdn"
-    if [[ -n $GENTOO_MIRRORS_VALUE ]]; then
+    if [ -n "$GENTOO_MIRRORS_VALUE" ]; then
         mopts+=("keep|Keep the mirrors chosen before: ${GENTOO_MIRRORS_VALUE}")
         def_mirror="keep"
     fi
     if have mirrorselect; then mopts+=("select|Choose mirrors myself (mirrorselect)"); fi
     choose mirror_mode "Download mirror" "$def_mirror" "${mopts[@]}"
-    if [[ $mirror_mode == "cdn" ]]; then
+    if [ "$mirror_mode" = "cdn" ]; then
         GENTOO_MIRRORS_VALUE=""
         DIST_BASE="https://distfiles.gentoo.org"
-    elif [[ $mirror_mode == "select" ]]; then
+    elif [ "$mirror_mode" = "select" ]; then
         GENTOO_MIRRORS_VALUE=""
         DIST_BASE="https://distfiles.gentoo.org"
         say "mirrorselect will show a list. Use the arrow keys and space bar to mark mirrors near you, then confirm with Enter."
@@ -1822,7 +2098,7 @@ q_software() {
         out=$(mirrorselect -i -o 2>/dev/tty || true)
         GENTOO_MIRRORS_VALUE=$(sed -n 's/^GENTOO_MIRRORS="\(.*\)"$/\1/p' <<<"$out" | head -n1 || true)
         GENTOO_MIRRORS_VALUE=$(trim "$GENTOO_MIRRORS_VALUE")
-        if [[ -n $GENTOO_MIRRORS_VALUE ]]; then
+        if [ -n "$GENTOO_MIRRORS_VALUE" ]; then
             DIST_BASE="${GENTOO_MIRRORS_VALUE%% *}"
             DIST_BASE="${DIST_BASE%/}"
             ok "Using mirrors: ${GENTOO_MIRRORS_VALUE}"
@@ -1834,20 +2110,20 @@ q_software() {
     local def_flatpak
     def_flatpak=$(yn_default WANT_FLATPAK y)
     WANT_FLATPAK="no"
-    if [[ $DE != "none" ]]; then
+    if [ "$DE" != "none" ]; then
         subsection "Flatpak"
         say "Flatpak installs desktop applications from Flathub in their own sandboxed containers, independent from Portage. They are prebuilt (no compiling), update separately with 'flatpak update', and use more disk space because they bundle their own libraries. Handy for large or proprietary apps such as Steam, Discord or Spotify."
         ask_yn WANT_FLATPAK "Install Flatpak and add the Flathub repository?" "$def_flatpak"
-        if [[ $WANT_FLATPAK == "yes" ]]; then
+        if [ "$WANT_FLATPAK" = "yes" ]; then
             choose_multi FLATPAK_APPS "Flatpak apps to install now (you can add more any time later)" "${FLATPAK_CATALOG[@]}"
         fi
     fi
-    if [[ $WANT_FLATPAK != "yes" ]]; then FLATPAK_APPS=""; fi
+    if [ "$WANT_FLATPAK" != "yes" ]; then FLATPAK_APPS=""; fi
 
     subsection "Native packages"
     say "These are installed with Portage (emerge), the Gentoo way. Everything is optional and you can install anything else later with 'emerge --ask <package>'. Pick nothing here if you chose the same apps as Flatpaks above."
     local -a catalog=()
-    if [[ $DE != "none" ]]; then catalog+=("${NATIVE_GUI_APPS[@]}"); fi
+    if [ "$DE" != "none" ]; then catalog+=("${NATIVE_GUI_APPS[@]}"); fi
     catalog+=("${NATIVE_CLI_APPS[@]}")
     choose_multi EXTRA_PKGS "Native packages to install" "${catalog[@]}"
 }
@@ -1876,8 +2152,8 @@ compute_derived() {
         gnome) PROFILE_SUFFIX="/desktop/gnome" ;;
         *) PROFILE_SUFFIX="/desktop" ;;
     esac
-    if [[ $INIT == "systemd" ]]; then PROFILE_SUFFIX+="/systemd"; fi
-    if [[ $DE == "none" ]]; then STAGE3_VARIANT="$INIT"; else STAGE3_VARIANT="desktop-${INIT}"; fi
+    if [ "$INIT" = "systemd" ]; then PROFILE_SUFFIX+="/systemd"; fi
+    if [ "$DE" = "none" ]; then STAGE3_VARIANT="$INIT"; else STAGE3_VARIANT="desktop-${INIT}"; fi
 }
 
 ask_all_questions() {
@@ -1897,55 +2173,62 @@ summary_row() {
 print_summary() {
     section "Summary: please check everything"
     summary_row "Desktop:" "$(de_label "$DE")"
-    if [[ $DE != "none" ]]; then
-        if [[ $DE == "sway" ]]; then
-            summary_row "Login:" "text console$( [[ $SWAY_AUTOSTART == yes ]] && echo ", Sway starts automatically on tty1" )"
+    if [ "$DE" != "none" ]; then
+        if [ "$DE" = "sway" ]; then
+            summary_row "Login:" "text console$( [ "$SWAY_AUTOSTART" = yes ] && printf '%s\n' ", Sway starts automatically on tty1" )"
         else
-            summary_row "Login screen:" "$( [[ $DM == none ]] && echo "none (text console)" || echo "$DM" )"
+            summary_row "Login screen:" "$( [ "$DM" = none ] && printf '%s\n' "none (text console)" || printf '%s\n' "$DM" )"
         fi
     fi
     summary_row "Init system:" "$INIT"
     summary_row "Profile:" "default/linux/amd64/<current>${PROFILE_SUFFIX}"
     summary_row "Stage3:" "stage3-amd64-${STAGE3_VARIANT}"
-    summary_row "Binary packages:" "$USE_BINPKG$( [[ $BINHOST_V3 == yes ]] && echo " (x86-64-v3 preferred)" )"
+    summary_row "Binary packages:" "$USE_BINPKG$( [ "$BINHOST_V3" = yes ] && printf '%s\n' " (x86-64-v3 preferred)" )"
     summary_row "Kernel:" "sys-kernel/${KERNEL_PKG}"
     summary_row "Compiler flags:" "-march=native -O2 -pipe"
     summary_row "MAKEOPTS:" "-j${MAKE_JOBS} -l${NPROC}   (emerge --jobs=${EMERGE_JOBS})"
-    summary_row "CPU_FLAGS_X86:" "$( [[ $TUNE_CPU_FLAGS == yes ]] && echo "detected with cpuid2cpuflags" || echo "profile default" )"
+    summary_row "CPU_FLAGS_X86:" "$( [ "$TUNE_CPU_FLAGS" = yes ] && printf '%s\n' "detected with cpuid2cpuflags" || printf '%s\n' "profile default" )"
     summary_row "VIDEO_CARDS:" "${VIDEO_CARDS:-(none)}"
-    echo
-    summary_row "Boot mode / bootloader:" "${BOOT_MODE^^} / ${BOOTLOADER}$( [[ $LIVE_BOOT_MODE == bios && $BOOT_MODE == uefi ]] && echo "   (live system in BIOS mode: bootloader at the EFI fallback path)" )"
-    if [[ $PART_MODE == "auto" ]]; then
+    printf '\n'
+    summary_row "Boot mode / bootloader:" "${BOOT_MODE^^}$( [ "$UEFI_BITS" = 32 ] && printf ' (32-bit)' ) / ${BOOTLOADER}$( [ "$LIVE_BOOT_MODE" = bios ] && [ "$BOOT_MODE" = uefi ] && printf '%s' "   (live system in BIOS mode: bootloader at the EFI fallback path)" )"
+    summary_row "Partition table:" "${PTABLE^^}"
+    if [ "$PART_MODE" = "auto" ]; then
         summary_row "Disk:" "${DISK}  ${C_RED}(EVERYTHING ON IT WILL BE ERASED)${C_RESET}"
     else
         summary_row "Disk mode:" "manual partitions"
-        if [[ $BOOT_MODE == "uefi" ]]; then
-            summary_row "EFI partition:" "${ESP_PART} -> /efi $( [[ $FORMAT_ESP == yes ]] && echo "(WILL BE FORMATTED)" || echo "(kept, not formatted)" )"
+        if [ "$BOOT_MODE" = "uefi" ]; then
+            summary_row "EFI partition:" "${ESP_PART} -> /efi $( [ "$FORMAT_ESP" = yes ] && printf '%s\n' "(WILL BE FORMATTED)" || printf '%s\n' "(kept, not formatted)" )"
         fi
-        if [[ -n $BOOT_PART ]]; then summary_row "/boot partition:" "${BOOT_PART} (WILL BE FORMATTED)"; fi
+        if [ -n "$BOOT_PART" ]; then summary_row "/boot partition:" "${BOOT_PART} (WILL BE FORMATTED)"; fi
         summary_row "Root partition:" "${ROOT_PART} (WILL BE FORMATTED)"
-        if [[ -n $SWAP_PART ]]; then summary_row "Swap partition:" "${SWAP_PART} (WILL BE FORMATTED)"; fi
-        if [[ $BOOT_MODE == "bios" ]]; then summary_row "GRUB installed to:" "$GRUB_DISK"; fi
+        if [ -n "$SWAP_PART" ]; then summary_row "Swap partition:" "${SWAP_PART} (WILL BE FORMATTED)"; fi
+        if [ "$BOOT_MODE" = "bios" ]; then summary_row "GRUB installed to:" "$GRUB_DISK"; fi
     fi
-    summary_row "Root filesystem:" "${FS}$( [[ $FS == btrfs ]] && echo " (subvolumes @, @home; zstd compression)" )"
-    summary_row "Encryption:" "$( [[ $ENCRYPT == yes ]] && echo "LUKS2" || echo "no" )"
-    summary_row "Swap:" "$SWAP_MODE$( [[ -n $SWAP_SIZE_GIB ]] && echo " (${SWAP_SIZE_GIB} GiB)" )"
-    echo
+    summary_row "Root filesystem:" "${FS}$( [ "$FS" = btrfs ] && printf '%s\n' " (subvolumes @, @home; zstd compression)" )"
+    summary_row "Encryption:" "$( [ "$ENCRYPT" = yes ] && printf '%s\n' "LUKS2" || printf '%s\n' "no" )"
+    summary_row "Swap:" "$SWAP_MODE$( [ -n "$SWAP_SIZE_GIB" ] && printf '%s\n' " (${SWAP_SIZE_GIB} GiB)" )"
+    printf '\n'
     summary_row "Hostname:" "$NEW_HOSTNAME"
     summary_row "Timezone:" "$TIMEZONE"
     summary_row "Locale:" "$LOCALE"
     summary_row "Console keymap:" "$KEYMAP"
-    if [[ $DE != "none" ]]; then summary_row "Desktop keyboard:" "${XKB_LAYOUT}${XKB_VARIANT:+ (${XKB_VARIANT})}"; fi
+    if [ "$DE" != "none" ]; then summary_row "Desktop keyboard:" "${XKB_LAYOUT}${XKB_VARIANT:+ (${XKB_VARIANT})}"; fi
     summary_row "User:" "$USERNAME (admin tool: ${PRIV_TOOL}, shell: ${USER_SHELL:-bash})"
-    echo
+    printf '\n'
     summary_row "Network:" "$NET_TOOL"
-    summary_row "Graphics driver:" "$( [[ $HAS_NVIDIA == yes ]] && echo "${GPU_DRIVER}$( [[ $GPU_DRIVER == nvidia && $NVIDIA_GEN == legacy580 ]] && echo " (580 branch)" )" || echo "Mesa (open source)" )"
+    summary_row "Graphics driver:" "$( [ "$HAS_NVIDIA" = yes ] && printf '%s\n' "${GPU_DRIVER}$( [ "$GPU_DRIVER" = nvidia ] && [ "$NVIDIA_GEN" = legacy580 ] && printf '%s\n' " (580 branch)" )" || printf '%s\n' "Mesa (open source)" )"
     summary_row "Bluetooth / printing / SSH:" "${WANT_BT} / ${WANT_CUPS} / ${WANT_SSH}"
-    if [[ $VIRT != "none" ]]; then summary_row "VM guest tools:" "$VIRT"; fi
+    if [ "$VIRT" != "none" ]; then summary_row "VM guest tools:" "$VIRT"; fi
+    if [ "$BCM_WIFI" = "wl" ] && [ "$VIRT" = "none" ]; then summary_row "Broadcom wl driver:" "$WANT_BCM_WL"; fi
+    if [ "$BCM_WIFI" = "b43" ] && [ "$VIRT" = "none" ]; then summary_row "Broadcom firmware:" "b43-firmware"; fi
+    if [ "$IS_LAPTOP" = "yes" ]; then
+        summary_row "Power management:" "${WANT_POWER}$( [ "$WANT_POWER" = yes ] && printf ' (%s%s)' "$( [ "$POWER_TOOL" = ppd ] && printf 'power-profiles-daemon' || printf 'TLP' )" "$( [ "$CPU_VENDOR" = GenuineIntel ] && printf ' + thermald' )" )"
+    fi
+    if [ "$IS_APPLE" = "yes" ] && [ "$VIRT" = "none" ]; then summary_row "Mac fan control:" "$WANT_MBPFAN"; fi
     summary_row "Mirror:" "${GENTOO_MIRRORS_VALUE:-global CDN (distfiles.gentoo.org)}"
     summary_row "Flatpak:" "${WANT_FLATPAK}${FLATPAK_APPS:+ (apps: ${FLATPAK_APPS})}"
     summary_row "Native packages:" "${EXTRA_PKGS:-none}"
-    echo
+    printf '\n'
 }
 
 confirm_install() {
@@ -1958,15 +2241,15 @@ confirm_install() {
         quit) info "Nothing was changed. Bye."; exit 0 ;;
         redo) return 1 ;;
     esac
-    echo
-    if [[ $PART_MODE == "auto" ]]; then
+    printf '\n'
+    if [ "$PART_MODE" = "auto" ]; then
         warn "LAST WARNING: every partition and file on ${DISK} will be permanently deleted."
         read_line typed "  Type ERASE in capital letters to continue (anything else goes back): "
-        if [[ $(trim "$typed") != "ERASE" ]]; then warn "Not confirmed."; return 1; fi
+        if [ "$(trim "$typed")" != "ERASE" ]; then warn "Not confirmed."; return 1; fi
     else
         warn "LAST WARNING: the partitions marked 'WILL BE FORMATTED' above will be erased."
         read_line typed "  Type FORMAT in capital letters to continue (anything else goes back): "
-        if [[ $(trim "$typed") != "FORMAT" ]]; then warn "Not confirmed."; return 1; fi
+        if [ "$(trim "$typed")" != "FORMAT" ]; then warn "Not confirmed."; return 1; fi
     fi
     return 0
 }
@@ -1975,7 +2258,7 @@ confirm_install() {
 # Disk preparation
 # ----------------------------------------------------------------------------
 root_fs_dev() {
-    if [[ $ENCRYPT == "yes" ]]; then echo "/dev/mapper/${LUKS_NAME}"; else echo "$ROOT_PART"; fi
+    if [ "$ENCRYPT" = "yes" ]; then printf '%s\n' "/dev/mapper/${LUKS_NAME}"; else printf '%s\n' "$ROOT_PART"; fi
 }
 
 blk_uuid() {
@@ -1988,23 +2271,23 @@ release_target() {
         warn "Something is still mounted at ${MNT} (probably an earlier attempt). Unmounting it."
         umount -R "$MNT" 2>/dev/null || umount -lR "$MNT" 2>/dev/null || true
     fi
-    if [[ -e /dev/mapper/${LUKS_NAME} ]]; then
+    if [ -e "/dev/mapper/${LUKS_NAME}" ]; then
         cryptsetup close "$LUKS_NAME" 2>/dev/null || true
     fi
     local -a devs=()
     local p
-    if [[ $PART_MODE == "auto" ]]; then
-        while read -r p; do devs+=("$p"); done < <(lsblk -lnpo NAME "$DISK" 2>/dev/null | tail -n +2)
+    if [ "$PART_MODE" = "auto" ]; then
+        while IFS= read -r p; do devs+=("$p"); done < <(lsblk -lnpo NAME "$DISK" 2>/dev/null | tail -n +2)
     else
         for p in "$ESP_PART" "$BOOT_PART" "$ROOT_PART" "$SWAP_PART"; do
-            if [[ -n $p ]]; then devs+=("$p"); fi
+            if [ -n "$p" ]; then devs+=("$p"); fi
         done
     fi
     for p in "${devs[@]}"; do
         swapoff "$p" 2>/dev/null || true
         umount "$p" 2>/dev/null || true
     done
-    if [[ $PART_MODE == "auto" ]] && have vgchange; then
+    if [ "$PART_MODE" = "auto" ] && have vgchange; then
         vgchange -an >>"$LOG" 2>&1 || true
     fi
 }
@@ -2012,9 +2295,33 @@ release_target() {
 # Build the sfdisk script for automatic partitioning (sets AUTO_LAYOUT and the *_PART variables).
 build_auto_layout() {
     local layout n=1
-    layout="label: gpt"$'\n'
     ESP_PART=""; BIOS_PART=""; BOOT_PART=""; SWAP_PART=""; ROOT_PART=""
-    if [[ $BOOT_MODE == "uefi" ]]; then
+    if [ "$PTABLE" = "mbr" ]; then
+        # MBR (BIOS mode only): GRUB embeds itself in the gap before the first
+        # partition, which sfdisk leaves at 1 MiB. The partition holding /boot
+        # is marked bootable (active), which some BIOSes and Macs require.
+        layout="label: dos"$'\n'
+        if [ "$NEED_BOOT_PART" = "yes" ]; then
+            layout+="size=${BOOT_SIZE_MIB}MiB, type=83, bootable"$'\n'
+            BOOT_PART=$(part_dev "$DISK" "$n")
+            n=$(( n + 1 ))
+        fi
+        if [ "$SWAP_MODE" = "partition" ]; then
+            layout+="size=${SWAP_SIZE_GIB}GiB, type=82"$'\n'
+            SWAP_PART=$(part_dev "$DISK" "$n")
+            n=$(( n + 1 ))
+        fi
+        if [ "$NEED_BOOT_PART" = "yes" ]; then
+            layout+="type=83"$'\n'
+        else
+            layout+="type=83, bootable"$'\n'
+        fi
+        ROOT_PART=$(part_dev "$DISK" "$n")
+        AUTO_LAYOUT=$layout
+        return 0
+    fi
+    layout="label: gpt"$'\n'
+    if [ "$BOOT_MODE" = "uefi" ]; then
         layout+="size=${ESP_SIZE_MIB}MiB, type=${GUID_ESP}, name=\"EFI system partition\""$'\n'
         ESP_PART=$(part_dev "$DISK" "$n")
     else
@@ -2022,12 +2329,12 @@ build_auto_layout() {
         BIOS_PART=$(part_dev "$DISK" "$n")
     fi
     n=$(( n + 1 ))
-    if [[ $NEED_BOOT_PART == "yes" ]]; then
+    if [ "$NEED_BOOT_PART" = "yes" ]; then
         layout+="size=${BOOT_SIZE_MIB}MiB, type=${GUID_LINUX}, name=\"Gentoo boot\""$'\n'
         BOOT_PART=$(part_dev "$DISK" "$n")
         n=$(( n + 1 ))
     fi
-    if [[ $SWAP_MODE == "partition" ]]; then
+    if [ "$SWAP_MODE" = "partition" ]; then
         layout+="size=${SWAP_SIZE_GIB}GiB, type=${GUID_SWAP}, name=\"Gentoo swap\""$'\n'
         SWAP_PART=$(part_dev "$DISK" "$n")
         n=$(( n + 1 ))
@@ -2041,12 +2348,12 @@ auto_partition() {
     build_auto_layout
     info "Removing old filesystem and partition table signatures from ${DISK}."
     local p
-    while read -r p; do
+    while IFS= read -r p; do
         wipefs -af "$p" >>"$LOG" 2>&1 || true
     done < <(lsblk -lnpo NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part" {print $1}')
     run wipefs -af "$DISK"
 
-    info "Writing the new GPT partition table with sfdisk:"
+    info "Writing the new ${PTABLE^^} partition table with sfdisk:"
     printf '%s' "$AUTO_LAYOUT" | sed 's/^/      /'
     printf '%s' "$AUTO_LAYOUT" | run sfdisk --wipe always --wipe-partitions always "$DISK"
     udevadm settle 2>/dev/null || true
@@ -2054,9 +2361,9 @@ auto_partition() {
 
     local tries
     for p in "$ESP_PART" "$BIOS_PART" "$BOOT_PART" "$SWAP_PART" "$ROOT_PART"; do
-        [[ -n $p ]] || continue
+        [ -n "$p" ] || continue
         tries=0
-        while [[ ! -b $p ]]; do
+        while [ ! -b "$p" ]; do
             tries=$(( tries + 1 ))
             if (( tries > 10 )); then die "Partition ${p} did not appear after partitioning."; fi
             partprobe "$DISK" 2>/dev/null || blockdev --rereadpt "$DISK" 2>/dev/null || true
@@ -2068,23 +2375,23 @@ auto_partition() {
 }
 
 format_partitions() {
-    if [[ $BOOT_MODE == "uefi" ]]; then
-        if [[ $FORMAT_ESP == "yes" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        if [ "$FORMAT_ESP" = "yes" ]; then
             info "Formatting the EFI system partition ${ESP_PART} as FAT32."
             run mkfs.vfat -F 32 -n EFI "$ESP_PART"
         else
             info "Keeping the existing EFI system partition ${ESP_PART} as it is."
         fi
     fi
-    if [[ -n $BOOT_PART ]]; then
+    if [ -n "$BOOT_PART" ]; then
         info "Formatting ${BOOT_PART} as ext4 for /boot."
         run mkfs.ext4 -F -L gentoo-boot "$BOOT_PART"
     fi
-    if [[ -n $SWAP_PART ]]; then
+    if [ -n "$SWAP_PART" ]; then
         info "Formatting ${SWAP_PART} as swap."
         run mkswap -L gentoo-swap "$SWAP_PART"
     fi
-    if [[ $ENCRYPT == "yes" ]]; then
+    if [ "$ENCRYPT" = "yes" ]; then
         info "Encrypting ${ROOT_PART} with LUKS2. The key derivation is slow on purpose (it makes guessing expensive), so this takes a few seconds."
         printf '%s' "$LUKS_PASSWORD" | run cryptsetup luksFormat --type luks2 --batch-mode --key-file=- "$ROOT_PART"
         printf '%s' "$LUKS_PASSWORD" | run cryptsetup open --key-file=- "$ROOT_PART" "$LUKS_NAME"
@@ -2099,7 +2406,7 @@ format_partitions() {
         xfs) run mkfs.xfs -f -L gentoo "$dev" ;;
         btrfs)
             run mkfs.btrfs -f -L gentoo "$dev"
-            mkdir -p "$MNT"
+            mkdir -p -- "$MNT"
             run mount "$dev" "$MNT"
             run btrfs subvolume create "$MNT/@"
             run btrfs subvolume create "$MNT/@home"
@@ -2110,8 +2417,8 @@ format_partitions() {
 
 # Mount the target filesystems (safe to call more than once).
 mount_target() {
-    mkdir -p "$MNT"
-    if [[ $ENCRYPT == "yes" && ! -e /dev/mapper/${LUKS_NAME} ]]; then
+    mkdir -p -- "$MNT"
+    if [ "$ENCRYPT" = "yes" ] && [ ! -e "/dev/mapper/${LUKS_NAME}" ]; then
         info "Unlocking the encrypted root partition ${ROOT_PART}."
         handoff_screen
         cryptsetup open "$ROOT_PART" "$LUKS_NAME"
@@ -2119,25 +2426,25 @@ mount_target() {
     local dev
     dev=$(root_fs_dev)
     if ! mountpoint -q "$MNT"; then
-        if [[ $FS == "btrfs" ]]; then
+        if [ "$FS" = "btrfs" ]; then
             run mount -o "${BTRFS_OPTS},subvol=@" "$dev" "$MNT"
         else
             run mount -o noatime "$dev" "$MNT"
         fi
     fi
-    if [[ $FS == "btrfs" ]]; then
-        mkdir -p "$MNT/home"
+    if [ "$FS" = "btrfs" ]; then
+        mkdir -p -- "$MNT/home"
         if ! mountpoint -q "$MNT/home"; then run mount -o "${BTRFS_OPTS},subvol=@home" "$dev" "$MNT/home"; fi
     fi
-    if [[ -n $BOOT_PART ]]; then
-        mkdir -p "$MNT/boot"
+    if [ -n "$BOOT_PART" ]; then
+        mkdir -p -- "$MNT/boot"
         if ! mountpoint -q "$MNT/boot"; then run mount -o noatime "$BOOT_PART" "$MNT/boot"; fi
     fi
-    if [[ $BOOT_MODE == "uefi" ]]; then
-        mkdir -p "$MNT/efi"
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        mkdir -p -- "$MNT/efi"
         if ! mountpoint -q "$MNT/efi"; then run mount -o umask=0077 "$ESP_PART" "$MNT/efi"; fi
     fi
-    if [[ -n $SWAP_PART ]] && ! grep -q "^${SWAP_PART} " /proc/swaps; then
+    if [ -n "$SWAP_PART" ] && ! grep -q "^${SWAP_PART} " /proc/swaps; then
         swapon "$SWAP_PART" 2>/dev/null || true
     fi
 }
@@ -2145,7 +2452,7 @@ mount_target() {
 prepare_disk() {
     section "Preparing the disk"
     release_target
-    if [[ $PART_MODE == "auto" ]]; then
+    if [ "$PART_MODE" = "auto" ]; then
         auto_partition
     fi
     format_partitions
@@ -2159,10 +2466,11 @@ prepare_disk() {
 # ----------------------------------------------------------------------------
 verify_stage3() {
     local f=$1 sig_ok="no" status gh
-    if [[ -s ${f}.asc ]] && have gpg; then
-        gh=$(mktemp -d)
-        chmod 700 "$gh"
-        if [[ -r /usr/share/openpgp-keys/gentoo-release.asc ]]; then
+    if [ -s "${f}.asc" ] && have gpg; then
+        make_work_dir
+        gh=$(mktemp -d "${WORK_DIR}/gnupg.XXXXXX")
+        chmod 700 -- "$gh"
+        if [ -r /usr/share/openpgp-keys/gentoo-release.asc ]; then
             GNUPGHOME=$gh gpg --batch --quiet --import /usr/share/openpgp-keys/gentoo-release.asc >>"$LOG" 2>&1 || true
         fi
         status=$(GNUPGHOME=$gh gpg --batch --status-fd 1 --verify "${f}.asc" "$f" 2>>"$LOG" || true)
@@ -2171,7 +2479,7 @@ verify_stage3() {
             GNUPGHOME=$gh gpg --batch --auto-key-locate=clear,nodefault,wkd --locate-key releng@gentoo.org >>"$LOG" 2>&1 || true
             status=$(GNUPGHOME=$gh gpg --batch --status-fd 1 --verify "${f}.asc" "$f" 2>>"$LOG" || true)
         fi
-        rm -rf "$gh"
+        rm -rf -- "$gh"
         if grep -q '^\[GNUPG:\] BADSIG' <<<"$status"; then
             die "The PGP signature of ${f} is BAD. The file is corrupted or has been tampered with. Aborting."
         fi
@@ -2181,14 +2489,14 @@ verify_stage3() {
         fi
     fi
 
-    if [[ -s ${f}.sha256 ]]; then
+    if [ -s "${f}.sha256" ]; then
         local expected actual
         # "<64 hex digits>  <file name>" lines, possibly inside a PGP clearsigned block.
         expected=$(tr -d '\r' <"${f}.sha256" | awk -v f="$f" '
             !found && length($1) == 64 && $1 ~ /^[0-9a-fA-F]+$/ && ($2 == f || $2 == "*" f) { print tolower($1); found = 1 }')
-        if [[ -n $expected ]]; then
+        if [ -n "$expected" ]; then
             actual=$(sha256sum "$f" | awk '{print $1}')
-            if [[ $expected != "$actual" ]]; then
+            if [ "$expected" != "$actual" ]; then
                 die "SHA256 checksum mismatch for ${f}. The download is corrupted. Run the installer again."
             fi
             ok "SHA256 checksum matches."
@@ -2197,7 +2505,7 @@ verify_stage3() {
         fi
     fi
 
-    if [[ $sig_ok != "yes" ]]; then
+    if [ "$sig_ok" != "yes" ]; then
         warn "The PGP signature could not be checked (gpg or the Gentoo signing key is unavailable)."
         say "The file was downloaded over HTTPS from Gentoo's servers, which protects it in transit, but a signature check is the stronger guarantee."
         if ! yesno "Continue without a verified signature?" y; then
@@ -2221,11 +2529,11 @@ resolve_stage3() {
         || die "Could not download ${index}. Check the network connection and try again. Nothing on disk has been changed."
     rel=$(printf '%s\n' "$listing" | tr -d '\r' | awk -v v="stage3-amd64-${STAGE3_VARIANT}-" '
         !found && $1 !~ /^#/ && $1 ~ /\.tar\.xz$/ && index($1, v) { print $1; found = 1 }')
-    if [[ -z $rel ]]; then
+    if [ -z "$rel" ]; then
         log "Stage3 index content: ${listing}"
         die "Could not find a stage3-amd64-${STAGE3_VARIANT} file name in ${index} (its content is in the log). Nothing on disk has been changed."
     fi
-    if [[ $rel == */* ]]; then
+    if [[ $rel = */* ]]; then
         STAGE3_URL="${base}/${rel}"
     else
         STAGE3_URL="${base}/current-stage3-amd64-${STAGE3_VARIANT}/${rel}"
@@ -2237,17 +2545,17 @@ resolve_stage3() {
 install_stage3() {
     section "Downloading and verifying the Gentoo stage3"
     say "A stage3 is a small but complete Gentoo base system (compiler, Portage, core tools) that everything else is built on. The installer downloads the newest stage3-amd64-${STAGE3_VARIANT}, checks its PGP signature from Gentoo Release Engineering and its SHA256 checksum, then unpacks it onto your new root filesystem."
-    if [[ -z $STAGE3_URL ]]; then resolve_stage3; fi
+    if [ -z "$STAGE3_URL" ]; then resolve_stage3; fi
     local url=$STAGE3_URL file=$STAGE3_FILE
-    cd "$MNT"
+    cd -- "$MNT" || die "Could not change into ${MNT}."
     fetch "$url" "$file"
     fetch "${url}.asc" "${file}.asc" || warn "Could not download the PGP signature file."
     fetch "${url}.sha256" "${file}.sha256" || warn "Could not download the SHA256 checksum file."
     verify_stage3 "$file"
     info "Unpacking the stage3 into ${MNT}. This takes a minute or two and prints nothing while it works."
     run tar xpf "$file" --xattrs-include='*.*' --numeric-owner -C "$MNT"
-    rm -f "$file" "${file}.asc" "${file}.sha256"
-    cd /
+    rm -f -- "$file" "${file}.asc" "${file}.sha256"
+    cd / || exit 1
     ok "Stage3 unpacked."
 }
 
@@ -2266,7 +2574,7 @@ mount_pseudo() {
         run mount --bind /run "$MNT/run"
         run mount --make-slave "$MNT/run"
     fi
-    cp --dereference /etc/resolv.conf "$MNT/etc/resolv.conf"
+    cp -L -- /etc/resolv.conf "$MNT/etc/resolv.conf"
 }
 
 hash_one_password() {
@@ -2299,16 +2607,16 @@ profile_version() {
 compute_cmdline() {
     local root_uuid luks_uuid extra=""
     root_uuid=$(blk_uuid "$(root_fs_dev)")
-    [[ -n $root_uuid ]] || die "Could not read the UUID of the root filesystem."
+    [ -n "$root_uuid" ] || die "Could not read the UUID of the root filesystem."
     KERNEL_CMDLINE="root=UUID=${root_uuid}"
-    if [[ $FS == "btrfs" ]]; then KERNEL_CMDLINE+=" rootflags=subvol=@"; fi
-    if [[ $ENCRYPT == "yes" ]]; then
+    if [ "$FS" = "btrfs" ]; then KERNEL_CMDLINE+=" rootflags=subvol=@"; fi
+    if [ "$ENCRYPT" = "yes" ]; then
         luks_uuid=$(blk_uuid "$ROOT_PART")
-        [[ -n $luks_uuid ]] || die "Could not read the UUID of the LUKS container."
+        [ -n "$luks_uuid" ] || die "Could not read the UUID of the LUKS container."
         KERNEL_CMDLINE="rd.luks.uuid=${luks_uuid} ${KERNEL_CMDLINE}"
         extra+=" rd.luks.uuid=${luks_uuid}"
     fi
-    if [[ $GPU_DRIVER == "nvidia" ]]; then
+    if [ "$GPU_DRIVER" = "nvidia" ]; then
         KERNEL_CMDLINE+=" nvidia_drm.modeset=1"
         extra+=" nvidia_drm.modeset=1"
     fi
@@ -2317,31 +2625,33 @@ compute_cmdline() {
 
 write_make_conf() {
     local f="$MNT/etc/portage/make.conf"
-    if [[ -f $f && ! -f $f.stage3-original ]]; then cp "$f" "$f.stage3-original"; fi
+    if [ -f "$f" ] && [ ! -f "$f.stage3-original" ]; then cp -- "$f" "$f.stage3-original"; fi
 
     local extra=""
-    if [[ $BOOTLOADER == "grub" && $BOOT_MODE == "uefi" ]]; then
+    if [ "$BOOTLOADER" = "grub" ] && [ "$BOOT_MODE" = "uefi" ] && [ "$UEFI_BITS" = "32" ]; then
+        extra+=$'\n# GRUB firmware target for this machine (32-bit UEFI with a 64-bit CPU).\nGRUB_PLATFORMS="efi-32"\n'
+    elif [ "$BOOTLOADER" = "grub" ] && [ "$BOOT_MODE" = "uefi" ]; then
         extra+=$'\n# GRUB firmware target for this machine.\nGRUB_PLATFORMS="efi-64"\n'
-    elif [[ $BOOTLOADER == "grub" ]]; then
+    elif [ "$BOOTLOADER" = "grub" ]; then
         extra+=$'\n# GRUB firmware target for this machine.\nGRUB_PLATFORMS="pc"\n'
     fi
-    if [[ $USE_BINPKG == "yes" ]]; then
-        extra+=$'\n# Use Gentoo\'s official binary packages when they match this configuration,\n# and require a valid PGP signature on each of them.\n# Remove this line to build everything from source.\nFEATURES="${FEATURES} getbinpkg binpkg-request-signature"\n'
+    if [ "$USE_BINPKG" = "yes" ]; then
+        extra+=$'\n# Use Gentoo\'s official binary packages when they match this configuration,\n# and require a valid PGP signature on each of them (current Portage checks\n# signatures by default; this keeps it explicit).\n# Remove this line to build everything from source.\nFEATURES="${FEATURES} getbinpkg binpkg-request-signature"\n'
     fi
-    if [[ -n $GENTOO_MIRRORS_VALUE ]]; then
+    if [ -n "$GENTOO_MIRRORS_VALUE" ]; then
         extra+=$'\n# Mirrors chosen with mirrorselect.\nGENTOO_MIRRORS="'"${GENTOO_MIRRORS_VALUE}"$'"\n'
     fi
     local lang region
     lang=${LOCALE%%_*}
     region=${LOCALE#*_}
     region=${region%%.*}
-    if [[ ! ( $lang == "en" && $region == "US" ) ]]; then
+    if [ "$lang" != "en" ] || [ "$region" != "US" ]; then
         extra+=$'\n# Translations to install for packages that offer them (for example LibreOffice, Firefox).\nL10N="'"${lang}-${region} ${lang}"$'"\n'
     fi
 
     cat >"$f" <<EOF
 # /etc/portage/make.conf
-# Written by gentoo-install.sh ${SCRIPT_VERSION} on $(date -u '+%Y-%m-%d %H:%M UTC').
+# Written by gentoo_install.sh ${SCRIPT_VERSION} on $(date -u '+%Y-%m-%d %H:%M UTC').
 # The stage3's original version is saved next to this file as make.conf.stage3-original.
 # Reference: man make.conf, https://wiki.gentoo.org/wiki//etc/portage/make.conf
 
@@ -2403,83 +2713,98 @@ EOF
 }
 
 write_binrepos() {
-    [[ $USE_BINPKG == "yes" ]] || return 0
+    [ "$USE_BINPKG" = "yes" ] || return 0
     local ver dir f
     ver=$(profile_version)
-    if [[ -z $ver ]]; then
+    if [ -z "$ver" ]; then
         warn "Could not determine the profile version from the stage3; assuming 23.0."
         ver="23.0"
     fi
     dir="$MNT/etc/portage/binrepos.conf"
     f="$dir/gentoobinhost.conf"
-    mkdir -p "$dir"
-    if [[ -f $f && ! -f $dir/gentoobinhost.conf.stage3-original ]]; then
-        cp "$f" "$dir/gentoobinhost.conf.stage3-original"
+    mkdir -p -- "$dir"
+    if [ -f "$f" ] && [ ! -f "$dir/gentoobinhost.conf.stage3-original" ]; then
+        cp -- "$f" "$dir/gentoobinhost.conf.stage3-original"
     fi
     {
-        echo "# Gentoo's official binary package host."
-        echo "# Written by gentoo-install.sh. The higher priority repository is tried first."
-        if [[ $BINHOST_V3 == "yes" ]]; then
-            echo ""
-            echo "# Packages built for x86-64-v3 CPUs (AVX2 generation and newer)."
-            echo "[gentoo-x86-64-v3]"
-            echo "priority = 9999"
-            echo "sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/${ver}/x86-64-v3/"
-            echo "verify-signature = true"
+        printf '%s\n' "# Gentoo's official binary package host."
+        printf '%s\n' "# Written by gentoo_install.sh. The higher priority repository is tried first."
+        if [ "$BINHOST_V3" = "yes" ]; then
+            printf '%s\n' ""
+            printf '%s\n' "# Packages built for x86-64-v3 CPUs (AVX2 generation and newer)."
+            printf '%s\n' "[gentoo-x86-64-v3]"
+            printf '%s\n' "priority = 9999"
+            printf '%s\n' "sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/${ver}/x86-64-v3/"
+            printf '%s\n' "verify-signature = true"
         fi
-        echo ""
-        echo "# Packages built for any x86-64 CPU."
-        echo "[gentoo]"
-        echo "priority = 9959"
-        echo "sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/${ver}/x86-64/"
-        echo "verify-signature = true"
+        printf '%s\n' ""
+        printf '%s\n' "# Packages built for any x86-64 CPU."
+        printf '%s\n' "[gentoo]"
+        printf '%s\n' "priority = 9959"
+        printf '%s\n' "sync-uri = https://distfiles.gentoo.org/releases/amd64/binpackages/${ver}/x86-64/"
+        printf '%s\n' "verify-signature = true"
     } >"$f"
     ok "Wrote /etc/portage/binrepos.conf/gentoobinhost.conf"
 }
 
 write_package_files() {
     local pu="$MNT/etc/portage/package.use" pl="$MNT/etc/portage/package.license"
-    mkdir -p "$pu" "$pl"
+    mkdir -p -- "$pu" "$pl"
 
     {
-        echo "# Written by gentoo-install.sh"
-        echo "# installkernel installs new kernels, builds the initramfs with dracut and"
-        echo "# updates the bootloader automatically every time a kernel is emerged."
-        if [[ $BOOTLOADER == "grub" ]]; then
-            echo "sys-kernel/installkernel dracut grub"
+        printf '%s\n' "# Written by gentoo_install.sh"
+        printf '%s\n' "# installkernel installs new kernels, builds the initramfs with dracut and"
+        printf '%s\n' "# updates the bootloader automatically every time a kernel is emerged."
+        if [ "$BOOTLOADER" = "grub" ]; then
+            printf '%s\n' "sys-kernel/installkernel dracut grub"
         else
-            echo "sys-kernel/installkernel dracut systemd systemd-boot"
-            if [[ $INIT == "openrc" ]]; then
-                echo "# systemd-boot and kernel-install on OpenRC come from systemd-utils."
-                echo "sys-apps/systemd-utils boot kernel-install"
+            printf '%s\n' "sys-kernel/installkernel dracut systemd systemd-boot"
+            if [ "$INIT" = "openrc" ]; then
+                printf '%s\n' "# systemd-boot and kernel-install on OpenRC come from systemd-utils."
+                printf '%s\n' "sys-apps/systemd-utils boot kernel-install"
             else
-                echo "sys-apps/systemd boot"
+                printf '%s\n' "sys-apps/systemd boot"
             fi
         fi
     } >"$pu/installkernel"
 
-    if [[ $ENCRYPT == "yes" && $INIT == "systemd" ]]; then
-        printf '%s\n' "# Written by gentoo-install.sh: unlock LUKS in the systemd initramfs." \
+    if [ "$ENCRYPT" = "yes" ] && [ "$INIT" = "systemd" ]; then
+        printf '%s\n' "# Written by gentoo_install.sh: unlock LUKS in the systemd initramfs." \
             "sys-apps/systemd cryptsetup" >"$pu/luks"
     fi
-    if [[ $WANT_FLATPAK == "yes" ]]; then
-        printf '%s\n' "# Written by gentoo-install.sh: show Flathub apps in the desktop software centres." \
+    if [ "$WANT_FLATPAK" = "yes" ]; then
+        printf '%s\n' "# Written by gentoo_install.sh: show Flathub apps in the desktop software centres." \
             "kde-plasma/discover flatpak" \
             "gnome-extra/gnome-software flatpak" >"$pu/flatpak"
     fi
 
     {
-        echo "# Written by gentoo-install.sh: licenses accepted for specific packages."
-        echo "sys-kernel/linux-firmware linux-fw-redistributable"
-        echo "sys-firmware/intel-microcode intel-ucode"
-        if [[ $GPU_DRIVER == "nvidia" ]]; then echo "x11-drivers/nvidia-drivers NVIDIA-2025"; fi
-        if [[ " $EXTRA_PKGS " == *" www-client/google-chrome "* ]]; then echo "www-client/google-chrome google-chrome"; fi
+        printf '%s\n' "# Written by gentoo_install.sh: licenses accepted for specific packages."
+        printf '%s\n' "sys-kernel/linux-firmware linux-fw-redistributable"
+        printf '%s\n' "sys-firmware/intel-microcode intel-ucode"
+        if [ "$GPU_DRIVER" = "nvidia" ]; then printf '%s\n' "x11-drivers/nvidia-drivers NVIDIA-2025"; fi
+        if [[ " $EXTRA_PKGS " = *" www-client/google-chrome "* ]]; then printf '%s\n' "www-client/google-chrome google-chrome"; fi
+        if [ "$WANT_BCM_WL" = "yes" ]; then printf '%s\n' "net-wireless/broadcom-sta Broadcom"; fi
+        if [ "$BCM_WIFI" = "b43" ] && [ "$VIRT" = "none" ]; then printf '%s\n' "sys-firmware/b43-firmware Broadcom"; fi
     } >"$pl/gentoo-install"
 
-    if [[ $GPU_DRIVER == "nvidia" && $NVIDIA_GEN == "legacy580" ]]; then
+    # Testing (~amd64) versions accepted for single packages that have no
+    # stable version, only when the hardware needs them and the user agreed.
+    local -a kw=()
+    if [ "$WANT_BCM_WL" = "yes" ]; then kw+=("net-wireless/broadcom-sta ~amd64"); fi
+    if [ "$WANT_MBPFAN" = "yes" ]; then kw+=("app-laptop/mbpfan ~amd64"); fi
+    if [ "${#kw[@]}" -gt 0 ]; then
+        local pk="$MNT/etc/portage/package.accept_keywords"
+        if [ ! -f "$pk" ]; then mkdir -p -- "$pk"; pk+="/gentoo-install"; fi
+        printf '%s\n' "# Written by gentoo_install.sh: testing versions allowed for hardware support." \
+            "${kw[@]}" >>"$pk"
+        ok "Allowed testing versions: ${kw[*]}"
+    fi
+
+    if [ "$GPU_DRIVER" = "nvidia" ] && [ "$NVIDIA_GEN" = "legacy580" ]; then
         local pm="$MNT/etc/portage/package.mask"
-        if [[ ! -f $pm ]]; then mkdir -p "$pm"; pm+="/gentoo-install"; fi
-        printf '%s\n' "# Written by gentoo-install.sh: this computer's NVIDIA card (Maxwell, Pascal" \
+        if [ ! -f "$pm" ]; then mkdir -p -- "$pm"; pm+="/gentoo-install"; fi
+        printf '%s\n' "# Written by gentoo_install.sh: this computer's NVIDIA card (Maxwell, Pascal" \
             "# or Volta) is supported up to the 580 driver branch. Newer branches only" \
             "# support Turing (GeForce GTX 16xx / RTX 20xx) and newer cards." \
             ">=x11-drivers/nvidia-drivers-581" >>"$pm"
@@ -2491,27 +2816,27 @@ write_package_files() {
 write_fstab() {
     local root_uuid f="$MNT/etc/fstab"
     root_uuid=$(blk_uuid "$(root_fs_dev)")
-    [[ -n $root_uuid ]] || die "Could not read the UUID of the root filesystem."
+    [ -n "$root_uuid" ] || die "Could not read the UUID of the root filesystem."
     {
-        echo "# /etc/fstab: filesystems mounted at boot. Written by gentoo-install.sh."
-        echo "# Devices are referenced by UUID so the entries survive disk renumbering."
-        echo "# <filesystem>                             <mountpoint> <type> <options>                       <dump> <pass>"
+        printf '%s\n' "# /etc/fstab: filesystems mounted at boot. Written by gentoo_install.sh."
+        printf '%s\n' "# Devices are referenced by UUID so the entries survive disk renumbering."
+        printf '%s\n' "# <filesystem>                             <mountpoint> <type> <options>                       <dump> <pass>"
         case "$FS" in
-            ext4) echo "UUID=${root_uuid}  /      ext4   noatime                          0 1" ;;
-            xfs) echo "UUID=${root_uuid}  /      xfs    noatime                          0 0" ;;
+            ext4) printf '%s\n' "UUID=${root_uuid}  /      ext4   noatime                          0 1" ;;
+            xfs) printf '%s\n' "UUID=${root_uuid}  /      xfs    noatime                          0 0" ;;
             btrfs)
-                echo "UUID=${root_uuid}  /      btrfs  ${BTRFS_OPTS},subvol=@      0 0"
-                echo "UUID=${root_uuid}  /home  btrfs  ${BTRFS_OPTS},subvol=@home  0 0"
+                printf '%s\n' "UUID=${root_uuid}  /      btrfs  ${BTRFS_OPTS},subvol=@      0 0"
+                printf '%s\n' "UUID=${root_uuid}  /home  btrfs  ${BTRFS_OPTS},subvol=@home  0 0"
                 ;;
         esac
-        if [[ -n $BOOT_PART ]]; then
-            echo "UUID=$(blk_uuid "$BOOT_PART")  /boot  ext4   noatime                          0 2"
+        if [ -n "$BOOT_PART" ]; then
+            printf '%s\n' "UUID=$(blk_uuid "$BOOT_PART")  /boot  ext4   noatime                          0 2"
         fi
-        if [[ $BOOT_MODE == "uefi" ]]; then
-            echo "UUID=$(blk_uuid "$ESP_PART")  /efi   vfat   umask=0077,noatime               0 2"
+        if [ "$BOOT_MODE" = "uefi" ]; then
+            printf '%s\n' "UUID=$(blk_uuid "$ESP_PART")  /efi   vfat   umask=0077,noatime               0 2"
         fi
-        if [[ -n $SWAP_PART ]]; then
-            echo "UUID=$(blk_uuid "$SWAP_PART")  none   swap   sw                               0 0"
+        if [ -n "$SWAP_PART" ]; then
+            printf '%s\n' "UUID=$(blk_uuid "$SWAP_PART")  none   swap   sw                               0 0"
         fi
     } >"$f"
     ok "Wrote /etc/fstab"
@@ -2519,20 +2844,21 @@ write_fstab() {
 }
 
 write_kernel_config() {
-    mkdir -p "$MNT/etc/kernel" "$MNT/etc/dracut.conf.d"
+    mkdir -p -- "$MNT/etc/kernel" "$MNT/etc/dracut.conf.d"
     printf '%s\n' "$KERNEL_CMDLINE" >"$MNT/etc/kernel/cmdline"
     {
-        echo "# Written by gentoo-install.sh"
-        echo "# Host-only initramfs: contains just the drivers this machine needs (smaller"
-        echo "# and faster). If you move this disk to different hardware, set hostonly=\"no\""
-        echo "# and run: emerge --config sys-kernel/${KERNEL_PKG}"
-        echo 'hostonly="yes"'
-        echo "# Kernel command line built into the initramfs. installkernel requires it when"
-        echo "# run inside a chroot, and it keeps the system bootable if the bootloader"
-        echo "# configuration is ever lost."
-        echo "kernel_cmdline=\" ${KERNEL_CMDLINE} \""
-        if [[ $ENCRYPT == "yes" ]]; then echo 'add_dracutmodules+=" crypt dm "'; fi
-        if [[ $FS == "btrfs" ]]; then echo 'add_dracutmodules+=" btrfs "'; fi
+        printf '%s\n' "# Written by gentoo_install.sh"
+        printf '%s\n' "# Host-only initramfs: contains just the drivers this machine needs (smaller"
+        printf '%s\n' "# and faster). If you move this disk to different hardware, set hostonly=\"no\""
+        printf '%s\n' "# and run: emerge --config sys-kernel/${KERNEL_PKG}"
+        printf '%s\n' 'hostonly="yes"'
+        printf '%s\n' "# Kernel command line built into the initramfs. The bootloader passes the same"
+        printf '%s\n' "# parameters (GRUB_CMDLINE_LINUX or /etc/kernel/cmdline); this copy keeps the"
+        printf '%s\n' "# system bootable if the bootloader configuration is ever lost. Dracut 111 and"
+        printf '%s\n' "# newer no longer guess it (hostonly_cmdline), so it is set explicitly."
+        printf '%s\n' "kernel_cmdline=\" ${KERNEL_CMDLINE} \""
+        if [ "$ENCRYPT" = "yes" ]; then printf '%s\n' 'add_dracutmodules+=" crypt dm "'; fi
+        if [ "$FS" = "btrfs" ]; then printf '%s\n' 'add_dracutmodules+=" btrfs "'; fi
     } >"$MNT/etc/dracut.conf.d/10-gentoo-install.conf"
     ok "Wrote /etc/kernel/cmdline and /etc/dracut.conf.d/10-gentoo-install.conf"
     info "Kernel command line: ${KERNEL_CMDLINE}"
@@ -2541,18 +2867,18 @@ write_kernel_config() {
 save_config() {
     local f=$1 v
     {
-        echo "# gentoo-install.sh ${SCRIPT_VERSION} settings, written $(date -u '+%Y-%m-%d %H:%M UTC')."
-        echo "# Used by --resume and by the second (chroot) stage."
+        printf '%s\n' "# gentoo_install.sh ${SCRIPT_VERSION} settings, written $(date -u '+%Y-%m-%d %H:%M UTC')."
+        printf '%s\n' "# Used by --resume and by the second (chroot) stage."
         for v in "${CONFIG_VARS[@]}"; do
             declare -p "$v" | sed 's/^declare /declare -g /'
         done
     } >"$f"
-    chmod 600 "$f"
+    chmod 600 -- "$f"
 }
 
 load_config() {
     # shellcheck disable=SC1090
-    source "$1"
+    . "$1"
 }
 
 write_target_config() {
@@ -2565,9 +2891,9 @@ write_target_config() {
     write_kernel_config
     save_config "${MNT}${CONF_PATH}"
     save_config "$LIVE_CONF_COPY"
-    install -m 700 "$SELF" "${MNT}${SCRIPT_PATH}"
+    install -m 700 -- "$SELF" "${MNT}${SCRIPT_PATH}"
     : >"${MNT}${PROGRESS_PATH}"
-    echo "live_setup" >>"${MNT}${PROGRESS_PATH}"
+    printf '%s\n' "live_setup" >>"${MNT}${PROGRESS_PATH}"
     ok "The new system is prepared for the chroot stage."
 }
 
@@ -2579,7 +2905,7 @@ run_chroot_stage() {
     say "From here on the installer runs inside your new Gentoo system (a 'chroot'), exactly like the Handbook's chapter on installing the base system. This is the long part. You can walk away: no more questions are asked." \
         "Output is shown on screen and saved to ${MNT}${TARGET_LOG}."
     if ! chroot "$MNT" /usr/bin/env -i HOME=/root TERM="${TERM:-linux}" /bin/bash "$SCRIPT_PATH" --chroot-stage; then
-        echo
+        printf '\n'
         err "The installation stopped inside the new system."
         err "Log: ${MNT}${TARGET_LOG}"
         print_resume_help
@@ -2589,33 +2915,38 @@ run_chroot_stage() {
 
 unmount_all() {
     sync
-    if [[ -n $SWAP_PART ]]; then swapoff "$SWAP_PART" 2>/dev/null || true; fi
+    if [ -n "$SWAP_PART" ]; then swapoff "$SWAP_PART" 2>/dev/null || true; fi
     umount -R "$MNT" 2>/dev/null || umount -lR "$MNT" 2>/dev/null || true
-    if [[ $ENCRYPT == "yes" && -e /dev/mapper/${LUKS_NAME} ]]; then
+    if [ "$ENCRYPT" = "yes" ] && [ -e "/dev/mapper/${LUKS_NAME}" ]; then
         cryptsetup close "$LUKS_NAME" 2>/dev/null || true
     fi
 }
 
 finish_install() {
-    cp "$LIVE_LOG" "$MNT/var/log/gentoo-install-live.log" 2>/dev/null || true
-    if [[ $NET_TOOL == "networkd" ]]; then
+    cp -- "$LIVE_LOG" "$MNT/var/log/gentoo-install-live.log" 2>/dev/null || true
+    if [ "$NET_TOOL" = "networkd" ]; then
         ln -sf ../run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"
     fi
-    rm -f "$LIVE_CONF_COPY"
+    rm -f -- "$LIVE_CONF_COPY"
 
     section "Installation complete"
     say "Gentoo is installed. After rebooting, log in as '${USERNAME}'." \
-        "To install software or update the system, open a terminal and run: gentoo-helper" \
+        "To install software or update the system, open a terminal and run: gentoo_helper" \
         "A guide with the next steps (updating, reading Gentoo news, managing kernels) was saved as ~/${NOTES_NAME} in your home directory and in /root. Installation logs are in /var/log/gentoo-install.log and /var/log/gentoo-install-live.log."
-    if [[ -s "$MNT$FAILED_PATH" ]]; then
+    if [ -s "$MNT$FAILED_PATH" ]; then
         warn "These optional packages could not be installed: $(tr '\n' ' ' <"$MNT$FAILED_PATH")"
         say "The system works without them. Try again after booting with: emerge --ask <package>"
     fi
-    if [[ $SECURE_BOOT == "on" ]]; then
+    if [ "$SECURE_BOOT" = "on" ]; then
         warn "Secure Boot is still enabled. Disable it in the firmware setup, or Gentoo will not boot."
     fi
-    if [[ $IS_APPLE == "yes" && $BOOT_MODE == "uefi" ]]; then
+    if [ "$IS_APPLE" = "yes" ] && [ "$BOOT_MODE" = "uefi" ]; then
         say "On this Mac: if it shows a flashing folder with a question mark after the restart, hold the Option key while it starts and choose 'EFI Boot'."
+    elif [ "$IS_APPLE" = "yes" ]; then
+        say "On this Mac: if it does not start Gentoo by itself, hold the Option key while it starts and choose 'Windows' (that is how Macs label any legacy BIOS system)."
+    fi
+    if [ "$BCM_WIFI" = "wl" ] && [ "$WANT_BCM_WL" = "yes" ]; then
+        say "Broadcom Wi-Fi: the wl driver loads after the reboot. If Wi-Fi does not show up, check the end of the install log for a failed net-wireless/broadcom-sta build."
     fi
     if yesno "Unmount the new system now?" y; then
         unmount_all
@@ -2631,32 +2962,32 @@ finish_install() {
 resume_install() {
     section "Resuming a previous installation"
     local conf="" dev ptype
-    if [[ -f ${MNT}${CONF_PATH} ]]; then
+    if [ -f "${MNT}${CONF_PATH}" ]; then
         conf="${MNT}${CONF_PATH}"
-    elif [[ -f $LIVE_CONF_COPY ]]; then
+    elif [ -f "$LIVE_CONF_COPY" ]; then
         conf="$LIVE_CONF_COPY"
     fi
-    if [[ -z $conf ]]; then
+    if [ -z "$conf" ]; then
         say "The new system is not mounted. Choose its root partition so the installer can find its saved settings."
         pick_partition ROOT_PART "Which partition is the root partition of the new Gentoo system?" ""
         ptype=$(blkid -c /dev/null -s TYPE -o value "$ROOT_PART" 2>/dev/null || true)
         dev=$ROOT_PART
-        if [[ $ptype == "crypto_LUKS" ]]; then
-            if [[ ! -e /dev/mapper/${LUKS_NAME} ]]; then
+        if [ "$ptype" = "crypto_LUKS" ]; then
+            if [ ! -e "/dev/mapper/${LUKS_NAME}" ]; then
                 info "The partition is encrypted. Enter its passphrase."
                 handoff_screen
                 cryptsetup open "$ROOT_PART" "$LUKS_NAME"
             fi
             dev="/dev/mapper/${LUKS_NAME}"
         fi
-        mkdir -p "$MNT"
-        if [[ $(blkid -c /dev/null -s TYPE -o value "$dev" 2>/dev/null || true) == "btrfs" ]]; then
+        mkdir -p -- "$MNT"
+        if [ "$(blkid -c /dev/null -s TYPE -o value "$dev" 2>/dev/null || true)" = "btrfs" ]; then
             mount -o "${BTRFS_OPTS},subvol=@" "$dev" "$MNT"
         else
             mount "$dev" "$MNT"
         fi
         conf="${MNT}${CONF_PATH}"
-        if [[ ! -f $conf ]]; then
+        if [ ! -f "$conf" ]; then
             umount "$MNT" || true
             die "No saved installer settings were found on ${ROOT_PART}. Either it is the wrong partition, or the installation stopped before the new system was prepared; in that case start over with: bash ${SELF}"
         fi
@@ -2667,7 +2998,7 @@ resume_install() {
         die "The installation stopped before the new system was fully prepared. Please start over with: bash ${SELF}"
     fi
     mount_pseudo
-    install -m 700 "$SELF" "${MNT}${SCRIPT_PATH}"
+    install -m 700 -- "$SELF" "${MNT}${SCRIPT_PATH}"
     ok "Settings loaded. Continuing with the steps that have not finished yet."
     ui_install_phase
     run_chroot_stage
@@ -2678,13 +3009,13 @@ resume_install() {
 fresh_install() {
     live_preflight
     : >"$LOG"
-    log "gentoo-install.sh ${SCRIPT_VERSION} started"
+    log "gentoo_install.sh ${SCRIPT_VERSION} started"
     init_defaults
     welcome
     live_keyboard
+    detect_hardware
     network_step
     sync_clock
-    detect_hardware
     show_hardware
     mac_boot_check
     while true; do
@@ -2733,25 +3064,25 @@ emerge_pkgs() {
 set_user_shell() {
     local want=${USER_SHELL:-bash} cmd path home="/home/${USERNAME}"
     local -a pkgs=()
-    if [[ $want == "bash" ]] || ! valid_shell_choice "$want"; then return 0; fi
+    if [ "$want" = "bash" ] || ! valid_shell_choice "$want"; then return 0; fi
     read -ra pkgs <<<"$(shell_field "$want" 2)"
     cmd=$(shell_field "$want" 3)
     info "Installing the ${want} shell for ${USERNAME}."
     emerge_optional "the ${want} shell" "${pkgs[@]}"
     path=$(command -v "$cmd" 2>/dev/null || true)
-    if [[ -z $path || ! -x $path ]]; then
+    if [ -z "$path" ] || [ ! -x "$path" ]; then
         warn "The ${want} shell is not available, so ${USERNAME} keeps bash. Change it later with: chsh -s <path to the shell>"
         return 0
     fi
     # Login screens and chsh only accept shells listed in /etc/shells.
     if ! grep -qxF "$path" /etc/shells 2>/dev/null; then
-        echo "$path" >>/etc/shells
+        printf '%s\n' "$path" >>/etc/shells
     fi
     run usermod -s "$path" "$USERNAME"
     ok "Login shell for ${USERNAME}: ${path}"
-    if [[ $want == "zsh" && ! -e $home/.zshrc ]]; then
+    if [ "$want" = "zsh" ] && [ ! -e "$home/.zshrc" ]; then
         # Without a ~/.zshrc, zsh starts an interactive setup wizard on first use.
-        printf '%s\n' "# Starter configuration written by gentoo-install.sh. Edit freely." \
+        printf '%s\n' "# Starter configuration written by gentoo_install.sh. Edit freely." \
             "HISTFILE=~/.zsh_history" "HISTSIZE=10000" "SAVEHIST=10000" \
             "setopt appendhistory sharehistory histignoredups" \
             "bindkey -e" \
@@ -2759,7 +3090,7 @@ set_user_shell() {
             "zstyle ':completion:*' menu select" \
             "autoload -Uz promptinit && promptinit" \
             "prompt gentoo" >"$home/.zshrc"
-        chown "${USERNAME}:${USERNAME}" "$home/.zshrc"
+        chown -- "${USERNAME}:${USERNAME}" "$home/.zshrc"
         ok "Wrote a starter ~/.zshrc for ${USERNAME}."
     fi
 }
@@ -2771,12 +3102,12 @@ login_file_for_user() {
     local sh
     sh=$(getent passwd "$USERNAME" | cut -d: -f7)
     case "${sh##*/}" in
-        bash) echo "sh .bash_profile" ;;
-        zsh) echo "sh .zprofile" ;;
-        yash) echo "sh .yash_profile" ;;
-        dash|ksh|mksh|sh) echo "sh .profile" ;;
-        fish) echo "fish .config/fish/conf.d/sway-autostart.fish" ;;
-        tcsh|csh) echo "csh .login" ;;
+        bash) printf '%s\n' "sh .bash_profile" ;;
+        zsh) printf '%s\n' "sh .zprofile" ;;
+        yash) printf '%s\n' "sh .yash_profile" ;;
+        dash|ksh|mksh|sh) printf '%s\n' "sh .profile" ;;
+        fish) printf '%s\n' "fish .config/fish/conf.d/sway-autostart.fish" ;;
+        tcsh|csh) printf '%s\n' "csh .login" ;;
         *) ;;
     esac
 }
@@ -2785,31 +3116,31 @@ login_file_for_user() {
 write_sway_autostart() {
     local home=$1 flag=$2 syntax="" file="" target
     read -r syntax file <<<"$(login_file_for_user)"
-    if [[ -z $file ]]; then
+    if [ -z "$file" ]; then
         warn "Sway is not started automatically for this login shell. Type 'sway' after logging in on the first console."
         return 0
     fi
     target="$home/$file"
     if grep -q "exec sway" "$target" 2>/dev/null; then return 0; fi
-    mkdir -p "$(dirname "$target")"
+    mkdir -p -- "$(dirname "$target")"
     case "$syntax" in
         sh)
             printf '%s\n' "" "# Start Sway after logging in on the first console (tty1)." \
-                "# Added by gentoo-install.sh. Delete these lines to turn it off." \
+                "# Added by gentoo_install.sh. Delete these lines to turn it off." \
                 "if [ -z \"\${WAYLAND_DISPLAY:-}\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]; then" \
                 "    exec sway${flag}" "fi" >>"$target" ;;
         fish)
             printf '%s\n' "# Start Sway after logging in on the first console (tty1)." \
-                "# Added by gentoo-install.sh. Delete this file to turn it off." \
+                "# Added by gentoo_install.sh. Delete this file to turn it off." \
                 "if status is-login; and test -z \"\$WAYLAND_DISPLAY\"; and test (tty) = /dev/tty1" \
                 "    exec sway${flag}" "end" >"$target" ;;
         csh)
             printf '%s\n' "" "# Start Sway after logging in on the first console (tty1)." \
-                "# Added by gentoo-install.sh. Delete these lines to turn it off." \
+                "# Added by gentoo_install.sh. Delete these lines to turn it off." \
                 "if ( ! \$?WAYLAND_DISPLAY ) then" \
                 "    if ( \"\`tty\`\" == \"/dev/tty1\" ) exec sway${flag}" "endif" >>"$target" ;;
     esac
-    chown -R "${USERNAME}:${USERNAME}" "$home/${file%%/*}"
+    chown -R -- "${USERNAME}:${USERNAME}" "$home/${file%%/*}"
     ok "Sway starts after logging in on tty1 (set up in ~/${file})."
 }
 
@@ -2824,7 +3155,7 @@ emerge_optional() {
     for p in "$@"; do
         if ! run emerge "${EMERGE_OPTS[@]}" --noreplace "$p"; then
             warn "Could not install ${p}; skipping it. Details are in ${LOG}."
-            echo "$p" >>"$FAILED_PATH"
+            printf '%s\n' "$p" >>"$FAILED_PATH"
         fi
     done
     return 0
@@ -2833,14 +3164,14 @@ emerge_optional() {
 # enable_service [--boot] NAME [ALTERNATIVE_NAME...]
 enable_service() {
     local runlevel="default" s unit first
-    if [[ ${1:-} == "--boot" ]]; then
+    if [ "${1:-}" = "--boot" ]; then
         runlevel="boot"
         shift
     fi
     first=${1:-}
     for s in "$@"; do
-        if [[ $INIT == "openrc" ]]; then
-            if [[ -e /etc/init.d/$s ]]; then
+        if [ "$INIT" = "openrc" ]; then
+            if [ -e "/etc/init.d/$s" ]; then
                 local shown
                 shown=$(rc-update show "$runlevel" 2>/dev/null || true)
                 if grep -Eq "^[[:space:]]*${s}[[:space:]]*\|" <<<"$shown"; then
@@ -2853,7 +3184,7 @@ enable_service() {
         else
             unit=$s
             if [[ $unit != *.* ]]; then unit="${unit}.service"; fi
-            if [[ -e /usr/lib/systemd/system/$unit || -e /etc/systemd/system/$unit || -e /lib/systemd/system/$unit ]]; then
+            if [ -e "/usr/lib/systemd/system/$unit" ] || [ -e "/etc/systemd/system/$unit" ] || [ -e "/lib/systemd/system/$unit" ]; then
                 run systemctl enable "$unit"
                 return 0
             fi
@@ -2866,16 +3197,16 @@ enable_service() {
 # Set KEY="VALUE" in a simple shell-style config file, adding the line if missing.
 set_conf_value() {
     local file=$1 key=$2 value=$3
-    touch "$file"
+    touch -- "$file"
     if grep -q "^${key}=" "$file"; then
-        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$file"
+        sed_inplace "s|^${key}=.*|${key}=\"${value}\"|" "$file"
     else
         printf '%s="%s"\n' "$key" "$value" >>"$file"
     fi
 }
 
 kernel_present() {
-    if [[ $BOOTLOADER == "grub" ]]; then
+    if [ "$BOOTLOADER" = "grub" ]; then
         compgen -G "/boot/vmlinuz-*" >/dev/null || compgen -G "/boot/kernel-*" >/dev/null
     else
         compgen -G "/efi/loader/entries/*.conf" >/dev/null
@@ -2896,18 +3227,18 @@ c_profile() {
     local cur ver target
     cur=$(readlink /etc/portage/make.profile 2>/dev/null || true)
     ver=$(grep -Eo 'amd64/[0-9]+\.[0-9]+' <<<"$cur" | head -n1 | cut -d/ -f2 || true)
-    if [[ -z $ver ]]; then
-        ver=$(eselect profile list | grep '(stable)' | grep -Eo 'default/linux/amd64/[0-9]+\.[0-9]+' | sort -Vu | tail -n1 | cut -d/ -f4 || true)
+    if [ -z "$ver" ]; then
+        ver=$(eselect profile list | grep '(stable)' | grep -Eo 'default/linux/amd64/[0-9]+\.[0-9]+' | cut -d/ -f4 | LC_ALL=C sort -t. -k1,1n -k2,2n -u | tail -n1 || true)
     fi
-    [[ -n $ver ]] || die "Could not determine the current profile version. Check 'eselect profile list'."
+    [ -n "$ver" ] || die "Could not determine the current profile version. Check 'eselect profile list'."
     target="default/linux/amd64/${ver}${PROFILE_SUFFIX}"
     info "Selecting profile: ${target}"
     # Capture the list first: piping eselect straight into 'grep -q' can make
     # eselect die of SIGPIPE, which pipefail reports as "not found".
     local list
-    list=$(eselect profile list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true)
+    list=$(eselect profile list 2>/dev/null | strip_colors || true)
     if ! grep -Eq "[[:space:]]${target//./\\.}([[:space:]]|\$)" <<<"$list"; then
-        if [[ -d /var/db/repos/gentoo/profiles/${target} ]]; then
+        if [ -d "/var/db/repos/gentoo/profiles/${target}" ]; then
             warn "eselect did not list ${target}, but it exists in the repository. Trying it anyway."
         else
             log "eselect profile list output:"$'\n'"${list}"
@@ -2919,7 +3250,7 @@ c_profile() {
 }
 
 c_binhost() {
-    if [[ $USE_BINPKG != "yes" ]]; then
+    if [ "$USE_BINPKG" != "yes" ]; then
         info "Binary packages are disabled; skipping."
         return 0
     fi
@@ -2931,7 +3262,7 @@ c_binhost() {
 }
 
 c_cpuflags() {
-    if [[ $TUNE_CPU_FLAGS != "yes" ]]; then
+    if [ "$TUNE_CPU_FLAGS" != "yes" ]; then
         info "Keeping the profile's default CPU_FLAGS_X86 (as chosen); skipping detection."
         return 0
     fi
@@ -2941,36 +3272,36 @@ c_cpuflags() {
     local flags
     flags=$(cpuid2cpuflags)
     mkdir -p /etc/portage/package.use
-    printf '# Detected by cpuid2cpuflags (gentoo-install.sh)\n*/* %s\n' "$flags" >/etc/portage/package.use/00cpu-flags
+    printf '# Detected by cpuid2cpuflags (gentoo_install.sh)\n*/* %s\n' "$flags" >/etc/portage/package.use/00cpu-flags
     ok "$flags"
 }
 
 c_locale_time() {
     step_header "Timezone and language" \
         "Sets the timezone (${TIMEZONE}) and generates the locale (${LOCALE}) so that programs show the right time, language and number formats."
-    if [[ -f /usr/share/zoneinfo/$TIMEZONE ]]; then
-        run ln -sf "../usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
+    if [ -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
+        run ln -sf -- "../usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
     else
         warn "Timezone '${TIMEZONE}' does not exist; using UTC. Change it later with: ln -sf ../usr/share/zoneinfo/Region/City /etc/localtime"
         run ln -sf ../usr/share/zoneinfo/UTC /etc/localtime
     fi
     local line
     line=$(grep -m1 "^${LOCALE} " /usr/share/i18n/SUPPORTED || true)
-    if [[ -z $line ]]; then
+    if [ -z "$line" ]; then
         warn "Locale ${LOCALE} is not supported; using en_US.UTF-8."
         LOCALE="en_US.UTF-8"
         line="en_US.UTF-8 UTF-8"
     fi
     {
-        echo "# Locales to generate. Written by gentoo-install.sh. Run locale-gen after editing."
-        echo "$line"
-        if [[ $LOCALE != "en_US.UTF-8" ]]; then echo "en_US.UTF-8 UTF-8"; fi
+        printf '%s\n' "# Locales to generate. Written by gentoo_install.sh. Run locale-gen after editing."
+        printf '%s\n' "$line"
+        if [ "$LOCALE" != "en_US.UTF-8" ]; then printf '%s\n' "en_US.UTF-8 UTF-8"; fi
     } >/etc/locale.gen
     run locale-gen
     if ! run eselect locale set "${LOCALE/.UTF-8/.utf8}"; then
         warn "eselect could not set the locale; set it later with 'eselect locale list' and 'eselect locale set'."
     fi
-    if [[ $INIT == "systemd" ]]; then
+    if [ "$INIT" = "systemd" ]; then
         printf 'LANG=%s\n' "$LOCALE" >/etc/locale.conf
     fi
     run env-update
@@ -2997,40 +3328,46 @@ c_world() {
 
 c_base_tools() {
     step_header "Install system tools" \
-        "Installs the tools a working Gentoo system needs: Portage helpers (gentoolkit, eclean-kernel), hardware listing (lspci, lsusb), filesystem tools for your disks, and $( [[ $INIT == openrc ]] && echo "a system logger, cron and time synchronisation (sysklogd, cronie, chrony)" || echo "shell completion" ). They are installed before the kernel so the initramfs can include what it needs."
+        "Installs the tools a working Gentoo system needs: Portage helpers (gentoolkit, eclean-kernel), hardware listing (lspci, lsusb), filesystem tools for your disks, and $( [ "$INIT" = openrc ] && printf '%s\n' "a system logger, cron and time synchronisation (sysklogd, cronie, chrony)" || printf '%s\n' "shell completion" ). They are installed before the kernel so the initramfs can include what it needs."
     local -a pkgs=(app-portage/gentoolkit app-admin/eclean-kernel sys-apps/pciutils sys-apps/usbutils
                    app-shells/bash-completion sys-apps/plocate app-arch/unzip)
-    if [[ $BOOT_MODE == "uefi" ]]; then pkgs+=(sys-fs/dosfstools sys-boot/efibootmgr); fi
+    if [ "$BOOT_MODE" = "uefi" ]; then pkgs+=(sys-fs/dosfstools sys-boot/efibootmgr); fi
     case "$FS" in
         xfs) pkgs+=(sys-fs/xfsprogs) ;;
         btrfs) pkgs+=(sys-fs/btrfs-progs) ;;
     esac
-    if [[ $ENCRYPT == "yes" ]]; then pkgs+=(sys-fs/cryptsetup); fi
-    if [[ $INIT == "openrc" ]]; then pkgs+=(app-admin/sysklogd sys-process/cronie net-misc/chrony); fi
-    if [[ $WANT_SSH == "yes" ]]; then pkgs+=(net-misc/openssh); fi
-    if [[ $PRIV_TOOL == "doas" ]]; then pkgs+=(app-admin/doas); else pkgs+=(app-admin/sudo); fi
+    if [ "$ENCRYPT" = "yes" ]; then pkgs+=(sys-fs/cryptsetup); fi
+    if [ "$INIT" = "openrc" ]; then pkgs+=(app-admin/sysklogd sys-process/cronie net-misc/chrony); fi
+    if [ "$WANT_SSH" = "yes" ]; then pkgs+=(net-misc/openssh); fi
+    if [ "$PRIV_TOOL" = "doas" ]; then pkgs+=(app-admin/doas); else pkgs+=(app-admin/sudo); fi
     emerge_pkgs "${pkgs[@]}"
 }
 
 c_firmware() {
-    if [[ $VIRT != "none" ]]; then
+    if [ "$VIRT" != "none" ]; then
         info "Virtual machine detected: device firmware and CPU microcode are not needed; skipping."
         return 0
     fi
     step_header "Install firmware and CPU microcode" \
         "Many devices (Wi-Fi, GPUs, Bluetooth, audio) need firmware files loaded by the kernel. linux-firmware provides them. CPU microcode updates fix CPU bugs and security issues; AMD microcode is part of linux-firmware, Intel's is a separate package."
-    local -a pkgs=(sys-kernel/linux-firmware)
-    if [[ $CPU_VENDOR == "GenuineIntel" ]]; then
-        pkgs+=(sys-firmware/intel-microcode sys-firmware/sof-firmware)
+    # sof-firmware: the Sound Open Firmware used by the audio of most laptops
+    # from about 2019 on, with Intel and with AMD CPUs.
+    local -a pkgs=(sys-kernel/linux-firmware sys-firmware/sof-firmware)
+    if [ "$CPU_VENDOR" = "GenuineIntel" ]; then
+        pkgs+=(sys-firmware/intel-microcode)
     fi
     emerge_pkgs "${pkgs[@]}"
+    if [ "$BCM_WIFI" = "b43" ]; then
+        info "Installing the firmware for this computer's Broadcom Wi-Fi card (b43 driver)."
+        emerge_optional "the Broadcom b43 firmware" sys-firmware/b43-firmware
+    fi
 }
 
 c_system_config() {
     step_header "Basic system configuration" \
         "Hostname, keyboard layout and machine ID."
-    echo "$NEW_HOSTNAME" >/etc/hostname
-    if [[ $INIT == "openrc" ]]; then
+    printf '%s\n' "$NEW_HOSTNAME" >/etc/hostname
+    if [ "$INIT" = "openrc" ]; then
         set_conf_value /etc/conf.d/hostname hostname "$NEW_HOSTNAME"
         set_conf_value /etc/conf.d/keymaps keymap "$KEYMAP"
     else
@@ -3039,19 +3376,19 @@ c_system_config() {
     if ! grep -qE "[[:space:]]${NEW_HOSTNAME}([[:space:]]|\$)" /etc/hosts; then
         printf '127.0.1.1\t%s\n' "$NEW_HOSTNAME" >>/etc/hosts
     fi
-    if [[ $DE != "none" && ( $XKB_LAYOUT != "us" || -n $XKB_VARIANT ) ]]; then
+    if [ "$DE" != "none" ] && { [ "$XKB_LAYOUT" != "us" ] || [ -n "$XKB_VARIANT" ]; }; then
         mkdir -p /etc/X11/xorg.conf.d
         {
-            echo "# Keyboard layout for X11 sessions. Written by gentoo-install.sh"
-            echo 'Section "InputClass"'
-            echo '    Identifier "system-keyboard"'
-            echo '    MatchIsKeyboard "on"'
-            echo "    Option \"XkbLayout\" \"${XKB_LAYOUT}\""
-            if [[ -n $XKB_VARIANT ]]; then echo "    Option \"XkbVariant\" \"${XKB_VARIANT}\""; fi
-            echo 'EndSection'
+            printf '%s\n' "# Keyboard layout for X11 sessions. Written by gentoo_install.sh"
+            printf '%s\n' 'Section "InputClass"'
+            printf '%s\n' '    Identifier "system-keyboard"'
+            printf '%s\n' '    MatchIsKeyboard "on"'
+            printf '%s\n' "    Option \"XkbLayout\" \"${XKB_LAYOUT}\""
+            if [ -n "$XKB_VARIANT" ]; then printf '%s\n' "    Option \"XkbVariant\" \"${XKB_VARIANT}\""; fi
+            printf '%s\n' 'EndSection'
         } >/etc/X11/xorg.conf.d/00-keyboard.conf
     fi
-    if [[ ! -s /etc/machine-id ]]; then
+    if [ ! -s /etc/machine-id ]; then
         if have systemd-machine-id-setup; then
             run systemd-machine-id-setup
         elif have dbus-uuidgen; then
@@ -3064,55 +3401,60 @@ c_system_config() {
 }
 
 c_bootloader_prep() {
-    if [[ $BOOTLOADER == "grub" ]]; then
+    if [ "$BOOTLOADER" = "grub" ]; then
         step_header "Install the GRUB bootloader" \
             "GRUB is installed first so that the kernel step can add itself to GRUB's menu automatically."
         local -a pkgs=(sys-boot/grub)
-        if [[ $BOOT_MODE == "uefi" ]]; then pkgs+=(sys-boot/efibootmgr); fi
-        if [[ $DUAL_BOOT == "yes" ]]; then pkgs+=(sys-boot/os-prober); fi
+        if [ "$BOOT_MODE" = "uefi" ]; then pkgs+=(sys-boot/efibootmgr); fi
+        if [ "$DUAL_BOOT" = "yes" ]; then pkgs+=(sys-boot/os-prober); fi
         emerge_pkgs "${pkgs[@]}"
-        if [[ $BOOT_MODE == "uefi" ]]; then
-            local nvram_ok="yes"
-            if [[ ! -d /sys/firmware/efi/efivars ]]; then
-                info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. GRUB also goes to the fallback path EFI/BOOT/BOOTX64.EFI, which the firmware finds by itself."
-                run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
+        if [ "$BOOT_MODE" = "uefi" ]; then
+            local nvram_ok="yes" target="x86_64-efi" fallback="BOOTX64.EFI" loader="grubx64.efi"
+            if [ "$UEFI_BITS" = "32" ]; then
+                # 32-bit UEFI with a 64-bit CPU: GRUB's i386-efi build starts the
+                # 64-bit kernel (the distribution kernel supports EFI mixed mode).
+                target="i386-efi"; fallback="BOOTIA32.EFI"; loader="grubia32.efi"
+            fi
+            if [ ! -d /sys/firmware/efi/efivars ]; then
+                info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. GRUB also goes to the fallback path EFI/BOOT/${fallback}, which the firmware finds by itself."
+                run grub-install --target="$target" --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
                 nvram_ok="no"
-            elif ! run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo; then
+            elif ! run grub-install --target="$target" --efi-directory=/efi --bootloader-id=Gentoo; then
                 warn "Could not add a boot entry to the firmware's boot menu (NVRAM). Installing GRUB without it."
-                run grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
+                run grub-install --target="$target" --efi-directory=/efi --bootloader-id=Gentoo --no-nvram
                 nvram_ok="no"
             fi
-            if [[ $PART_MODE == "auto" ]] || [[ $nvram_ok == "no" && ! -e /efi/EFI/BOOT/BOOTX64.EFI ]]; then
-                info "Also installing GRUB at the fallback path EFI/BOOT/BOOTX64.EFI, which firmware finds even without a boot menu entry."
-                run grub-install --target=x86_64-efi --efi-directory=/efi --removable
-            elif [[ $nvram_ok == "no" ]]; then
-                warn "The firmware boot menu may not list Gentoo. After rebooting, pick EFI/Gentoo/grubx64.efi in the firmware boot menu, or add an entry with efibootmgr."
+            if [ "$PART_MODE" = "auto" ] || { [ "$nvram_ok" = "no" ] && [ ! -e "/efi/EFI/BOOT/$fallback" ]; }; then
+                info "Also installing GRUB at the fallback path EFI/BOOT/${fallback}, which firmware finds even without a boot menu entry."
+                run grub-install --target="$target" --efi-directory=/efi --removable
+            elif [ "$nvram_ok" = "no" ]; then
+                warn "The firmware boot menu may not list Gentoo. After rebooting, pick EFI/Gentoo/${loader} in the firmware boot menu, or add an entry with efibootmgr."
             fi
         else
             run grub-install --target=i386-pc "$GRUB_DISK"
         fi
-        if ! grep -q "gentoo-install.sh" /etc/default/grub; then
+        if ! grep -q "gentoo_install.sh" /etc/default/grub; then
             {
-                echo ""
-                echo "# ---- Added by gentoo-install.sh ----"
-                echo "# Extra kernel parameters. root= is added automatically by grub-mkconfig."
-                echo "GRUB_CMDLINE_LINUX=\"${GRUB_EXTRA_CMDLINE}\""
-                if [[ $DUAL_BOOT == "yes" ]]; then
-                    echo "# Look for other operating systems (Windows, other Linux) on every grub-mkconfig run."
-                    echo "GRUB_DISABLE_OS_PROBER=false"
+                printf '%s\n' ""
+                printf '%s\n' "# ---- Added by gentoo_install.sh ----"
+                printf '%s\n' "# Extra kernel parameters. root= is added automatically by grub-mkconfig."
+                printf '%s\n' "GRUB_CMDLINE_LINUX=\"${GRUB_EXTRA_CMDLINE}\""
+                if [ "$DUAL_BOOT" = "yes" ]; then
+                    printf '%s\n' "# Look for other operating systems (Windows, other Linux) on every grub-mkconfig run."
+                    printf '%s\n' "GRUB_DISABLE_OS_PROBER=false"
                 fi
             } >>/etc/default/grub
         fi
     else
         step_header "Install the systemd-boot bootloader" \
             "systemd-boot is installed to the EFI system partition first, so the kernel step can add its boot entries automatically."
-        if [[ $INIT == "openrc" ]]; then
+        if [ "$INIT" = "openrc" ]; then
             run emerge "${EMERGE_OPTS[@]}" --oneshot --update --newuse sys-apps/systemd-utils
         else
             run emerge "${EMERGE_OPTS[@]}" --oneshot --update --newuse sys-apps/systemd
         fi
         local -a bootctl_opts=()
-        if [[ ! -d /sys/firmware/efi/efivars ]]; then
+        if [ ! -d /sys/firmware/efi/efivars ]; then
             info "The live system was started in BIOS mode, so the firmware's boot menu cannot be changed from here. systemd-boot is installed at the fallback path EFI/BOOT/BOOTX64.EFI, which the firmware finds by itself."
             bootctl_opts=(--no-variables)
         fi
@@ -3121,13 +3463,13 @@ c_bootloader_prep() {
             run bootctl install --graceful
         fi
         mkdir -p /efi/loader
-        printf '%s\n' "# systemd-boot menu settings. Written by gentoo-install.sh" "timeout 3" >/efi/loader/loader.conf
+        printf '%s\n' "# systemd-boot menu settings. Written by gentoo_install.sh" "timeout 3" >/efi/loader/loader.conf
     fi
 }
 
 c_kernel() {
     step_header "Install the Linux kernel" \
-        "Installs sys-kernel/${KERNEL_PKG}. installkernel then builds the initramfs with dracut (a small early-boot system that loads the drivers needed to mount your root filesystem$( [[ $ENCRYPT == yes ]] && echo " and asks for your encryption passphrase" )) and registers the kernel with ${BOOTLOADER}."
+        "Installs sys-kernel/${KERNEL_PKG}. installkernel then builds the initramfs with dracut (a small early-boot system that loads the drivers needed to mount your root filesystem$( [ "$ENCRYPT" = yes ] && printf '%s\n' " and asks for your encryption passphrase" )) and registers the kernel with ${BOOTLOADER}."
     emerge_pkgs sys-kernel/installkernel
     emerge_pkgs "sys-kernel/${KERNEL_PKG}"
     if kernel_present; then
@@ -3145,7 +3487,7 @@ c_network() {
         dhcpcd) emerge_pkgs net-misc/dhcpcd ;;
         networkd)
             mkdir -p /etc/systemd/network
-            printf '%s\n' "# Wired Ethernet via DHCP. Written by gentoo-install.sh" \
+            printf '%s\n' "# Wired Ethernet via DHCP. Written by gentoo_install.sh" \
                 "[Match]" "Name=en* eth*" "" "[Network]" "DHCP=yes" >/etc/systemd/network/20-wired.network
             ok "Wrote /etc/systemd/network/20-wired.network"
             ;;
@@ -3155,7 +3497,7 @@ c_network() {
 c_users() {
     step_header "User accounts" \
         "Sets the root password, creates '${USERNAME}' in the wheel group, and allows the wheel group to use ${PRIV_TOOL}."
-    if [[ -z $ROOT_HASH || -z $USER_HASH ]]; then
+    if [ -z "$ROOT_HASH" ] || [ -z "$USER_HASH" ]; then
         if id "$USERNAME" >/dev/null 2>&1; then
             info "Accounts were already configured."
             return 0
@@ -3171,9 +3513,9 @@ c_users() {
     ok "User ${USERNAME} created and password set."
     set_user_shell
 
-    if [[ $PRIV_TOOL == "sudo" ]]; then
+    if [ "$PRIV_TOOL" = "sudo" ]; then
         mkdir -p /etc/sudoers.d
-        printf '%s\n' "# Members of the wheel group may run any command as root. Written by gentoo-install.sh" \
+        printf '%s\n' "# Members of the wheel group may run any command as root. Written by gentoo_install.sh" \
             "%wheel ALL=(ALL:ALL) ALL" >/etc/sudoers.d/10-wheel
         chmod 440 /etc/sudoers.d/10-wheel
         if have visudo && ! visudo -cf /etc/sudoers.d/10-wheel >>"$LOG" 2>&1; then
@@ -3182,21 +3524,20 @@ c_users() {
         fi
         ok "sudo enabled for the wheel group."
     else
-        printf '%s\n' "# Members of the wheel group may run commands as root. Written by gentoo-install.sh" \
+        printf '%s\n' "# Members of the wheel group may run commands as root. Written by gentoo_install.sh" \
             "permit :wheel" >/etc/doas.conf
         chmod 600 /etc/doas.conf
         ok "doas enabled for the wheel group."
     fi
 
     # The hashes are no longer needed; remove them from the settings file.
-    sed -i -e 's/^declare -g -- ROOT_HASH=.*/declare -g -- ROOT_HASH=""/' \
-           -e 's/^declare -g -- USER_HASH=.*/declare -g -- USER_HASH=""/' "$CONF_PATH"
+    sed_inplace 's/^declare -g -- ROOT_HASH=.*/declare -g -- ROOT_HASH=""/; s/^declare -g -- USER_HASH=.*/declare -g -- USER_HASH=""/' "$CONF_PATH"
     ROOT_HASH=""
     USER_HASH=""
 }
 
 c_desktop() {
-    if [[ $DE == "none" ]]; then
+    if [ "$DE" = "none" ]; then
         info "No desktop selected; skipping."
         return 0
     fi
@@ -3219,26 +3560,26 @@ c_desktop() {
     esac
     pkgs+=(media-video/pipewire media-video/wireplumber media-fonts/noto media-fonts/noto-emoji x11-misc/xdg-user-dirs)
     case "$DM" in
-        sddm) pkgs+=(x11-misc/sddm) ;;
+        sddm) pkgs+=(gui-apps/sddm) ;;
         gdm) pkgs+=(gnome-base/gdm) ;;
         lightdm) pkgs+=(x11-misc/lightdm x11-misc/lightdm-gtk-greeter) ;;
     esac
-    if [[ $INIT == "openrc" && $DM != "none" ]]; then pkgs+=(gui-libs/display-manager-init); fi
+    if [ "$INIT" = "openrc" ] && [ "$DM" != "none" ]; then pkgs+=(gui-libs/display-manager-init); fi
     emerge_pkgs "${pkgs[@]}"
 
-    if [[ $INIT == "openrc" && $DE == "gnome" ]]; then
+    if [ "$INIT" = "openrc" ] && [ "$DE" = "gnome" ]; then
         emerge_optional "openrc-settingsd (GNOME system settings on OpenRC)" app-admin/openrc-settingsd
     fi
-    if [[ $INIT == "openrc" && $DM != "none" ]]; then
+    if [ "$INIT" = "openrc" ] && [ "$DM" != "none" ]; then
         set_conf_value /etc/conf.d/display-manager DISPLAYMANAGER "$DM"
         ok "Display manager for OpenRC set to ${DM} in /etc/conf.d/display-manager."
     fi
-    if [[ $DM == "lightdm" ]]; then
+    if [ "$DM" = "lightdm" ]; then
         mkdir -p /etc/lightdm/lightdm.conf.d
-        printf '%s\n' "# Written by gentoo-install.sh" "[Seat:*]" "greeter-session=lightdm-gtk-greeter" \
+        printf '%s\n' "# Written by gentoo_install.sh" "[Seat:*]" "greeter-session=lightdm-gtk-greeter" \
             >/etc/lightdm/lightdm.conf.d/50-gentoo-install.conf
     fi
-    if [[ $DM == "sddm" ]] && getent passwd sddm >/dev/null; then
+    if [ "$DM" = "sddm" ] && getent passwd sddm >/dev/null; then
         usermod -aG video sddm || true
     fi
     info "Deleting the downloaded binary packages (already installed; they only take up space)."
@@ -3247,43 +3588,47 @@ c_desktop() {
 
 setup_zram() {
     mkdir -p /usr/local/sbin
-    cat >/usr/local/sbin/zram-swap <<'EOF'
+    cat >/usr/local/sbin/zram_swap <<'EOF'
 #!/bin/sh
-# Compressed swap in RAM (zram). Installed by gentoo-install.sh.
+# Compressed swap in RAM (zram). Installed by gentoo_install.sh.
 # Size: equal to RAM, capped at 8 GiB. Memory is only used for pages actually swapped.
-case "$1" in
+set -u
+case "${1:-}" in
     start)
         modprobe zram 2>/dev/null || true
-        [ -e /sys/block/zram0 ] || { echo "zram-swap: zram is not available" >&2; exit 1; }
-        grep -q '^/dev/zram0 ' /proc/swaps && exit 0
+        if [ ! -e /sys/block/zram0 ]; then
+            printf '%s\n' "zram_swap: zram is not available" >&2
+            exit 1
+        fi
+        if grep -q '^/dev/zram0 ' /proc/swaps; then exit 0; fi
         mem_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
         cap_kib=$((8 * 1024 * 1024))
         size_kib=$mem_kib
-        [ "$size_kib" -gt "$cap_kib" ] && size_kib=$cap_kib
-        echo 1 > /sys/block/zram0/reset 2>/dev/null || true
-        echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-        echo "${size_kib}K" > /sys/block/zram0/disksize
+        if [ "$size_kib" -gt "$cap_kib" ]; then size_kib=$cap_kib; fi
+        printf '%s\n' 1 >/sys/block/zram0/reset 2>/dev/null || true
+        printf '%s\n' zstd >/sys/block/zram0/comp_algorithm 2>/dev/null || true
+        printf '%sK\n' "$size_kib" >/sys/block/zram0/disksize
         mkswap /dev/zram0 >/dev/null
         swapon -p 100 /dev/zram0
         ;;
     stop)
         swapoff /dev/zram0 2>/dev/null || true
-        echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+        printf '%s\n' 1 >/sys/block/zram0/reset 2>/dev/null || true
         ;;
     *)
-        echo "usage: zram-swap start|stop" >&2
+        printf '%s\n' "usage: zram_swap start|stop" >&2
         exit 2
         ;;
 esac
 EOF
-    chmod 755 /usr/local/sbin/zram-swap
-    if [[ $INIT == "openrc" ]]; then
+    chmod 755 /usr/local/sbin/zram_swap
+    if [ "$INIT" = "openrc" ]; then
         mkdir -p /etc/local.d
-        printf '#!/bin/sh\n/usr/local/sbin/zram-swap start\n' >/etc/local.d/zram-swap.start
-        printf '#!/bin/sh\n/usr/local/sbin/zram-swap stop\n' >/etc/local.d/zram-swap.stop
-        chmod 755 /etc/local.d/zram-swap.start /etc/local.d/zram-swap.stop
+        printf '#!/bin/sh\n/usr/local/sbin/zram_swap start\n' >/etc/local.d/zram_swap.start
+        printf '#!/bin/sh\n/usr/local/sbin/zram_swap stop\n' >/etc/local.d/zram_swap.stop
+        chmod 755 /etc/local.d/zram_swap.start /etc/local.d/zram_swap.stop
     else
-        cat >/etc/systemd/system/zram-swap.service <<'EOF'
+        cat >/etc/systemd/system/zram_swap.service <<'EOF'
 [Unit]
 Description=Compressed swap in RAM (zram)
 DefaultDependencies=no
@@ -3293,8 +3638,8 @@ Conflicts=shutdown.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/zram-swap start
-ExecStop=/usr/local/sbin/zram-swap stop
+ExecStart=/usr/local/sbin/zram_swap start
+ExecStop=/usr/local/sbin/zram_swap stop
 
 [Install]
 WantedBy=swap.target
@@ -3306,33 +3651,65 @@ EOF
 c_hardware() {
     step_header "Drivers and hardware support" \
         "Installs graphics, Bluetooth, printing and virtual machine support as selected, and sets up swap and SSD maintenance."
-    if [[ $GPU_DRIVER == "nvidia" ]]; then
+    if [ "$GPU_DRIVER" = "nvidia" ]; then
         info "Installing the proprietary NVIDIA driver. Its kernel module is built for the installed kernel and rebuilt automatically on kernel updates (USE=dist-kernel)."
         emerge_optional "the NVIDIA driver" x11-drivers/nvidia-drivers
     fi
     local -a pkgs=()
-    if [[ $WANT_BT == "yes" ]]; then
+    if [ "$WANT_BT" = "yes" ]; then
         pkgs+=(net-wireless/bluez)
         case "$DE" in
             xfce|mate|lxqt|cinnamon|i3|sway) pkgs+=(net-wireless/blueman) ;;
         esac
     fi
-    if [[ $WANT_CUPS == "yes" ]]; then pkgs+=(net-print/cups); fi
+    if [ "$WANT_CUPS" = "yes" ]; then pkgs+=(net-print/cups); fi
+    if [ "$WANT_POWER" = "yes" ]; then
+        if [ "$POWER_TOOL" = "ppd" ]; then pkgs+=(sys-power/power-profiles-daemon); else pkgs+=(sys-power/tlp); fi
+        if [ "$CPU_VENDOR" = "GenuineIntel" ]; then pkgs+=(sys-power/thermald); fi
+    fi
+    if [ "$HYBRID_GPU" = "yes" ]; then
+        case "$DE" in
+            plasma|gnome) pkgs+=(sys-power/switcheroo-control) ;;
+        esac
+    fi
     case "$VIRT" in
         kvm)
             pkgs+=(app-emulation/qemu-guest-agent)
-            if [[ $DE != "none" ]]; then pkgs+=(app-emulation/spice-vdagent); fi
+            if [ "$DE" != "none" ]; then pkgs+=(app-emulation/spice-vdagent); fi
             ;;
         vmware) pkgs+=(app-emulation/open-vm-tools) ;;
         virtualbox) pkgs+=(app-emulation/virtualbox-guest-additions) ;;
     esac
     emerge_optional "hardware support packages" "${pkgs[@]}"
 
-    if [[ $SWAP_MODE == "zram" ]]; then setup_zram; fi
+    if [ "$WANT_MBPFAN" = "yes" ]; then
+        info "Installing mbpfan (fan control for Intel Macs)."
+        emerge_optional "mbpfan" app-laptop/mbpfan
+        # mbpfan reads the Mac's sensors through these two modules. Both
+        # usually load by themselves; listing them makes sure.
+        mkdir -p /etc/modules-load.d
+        printf '%s\n' "# Sensors for mbpfan. Written by gentoo_install.sh" "applesmc" "coretemp" \
+            >/etc/modules-load.d/mbpfan.conf
+    fi
 
-    if [[ $IS_SSD == "yes" && $INIT == "openrc" ]]; then
+    if [ "$WANT_BCM_WL" = "yes" ]; then
+        info "Installing Broadcom's wl Wi-Fi driver. It is compiled against the installed kernel, so this needs the kernel's build files (the distribution kernel provides them)."
+        emerge_optional "the Broadcom wl driver" net-wireless/broadcom-sta
+        # The open drivers claim the same cards first and keep wl from working.
+        mkdir -p /etc/modprobe.d
+        printf '%s\n' "# Written by gentoo_install.sh: this computer's Broadcom Wi-Fi card needs the" \
+            "# proprietary wl driver (net-wireless/broadcom-sta). These open drivers would" \
+            "# claim the card first. Delete this file if you replace the card." \
+            "blacklist b43" "blacklist b43legacy" "blacklist bcma" "blacklist ssb" \
+            "blacklist brcmsmac" "blacklist brcmfmac" >/etc/modprobe.d/broadcom-wl-blacklist.conf
+        ok "Blocked the open Broadcom drivers in /etc/modprobe.d/broadcom-wl-blacklist.conf."
+    fi
+
+    if [ "$SWAP_MODE" = "zram" ]; then setup_zram; fi
+
+    if [ "$IS_SSD" = "yes" ] && [ "$INIT" = "openrc" ]; then
         mkdir -p /etc/cron.weekly
-        printf '%s\n' "#!/bin/sh" "# Tell the SSD which blocks are free (TRIM). Written by gentoo-install.sh" \
+        printf '%s\n' "#!/bin/sh" "# Tell the SSD which blocks are free (TRIM). Written by gentoo_install.sh" \
             "fstrim --all --quiet" >/etc/cron.weekly/fstrim
         chmod 755 /etc/cron.weekly/fstrim
         ok "Weekly SSD TRIM scheduled (cron)."
@@ -3340,18 +3717,18 @@ c_hardware() {
 }
 
 c_software() {
-    if [[ -z $EXTRA_PKGS && $WANT_FLATPAK != "yes" ]]; then
+    if [ -z "$EXTRA_PKGS" ] && [ "$WANT_FLATPAK" != "yes" ]; then
         info "No additional software selected; skipping."
         return 0
     fi
     step_header "Install your selected applications" \
         "Optional software. If a package fails to install, it is skipped and listed at the end; the rest of the system is not affected."
-    if [[ -n $EXTRA_PKGS ]]; then
+    if [ -n "$EXTRA_PKGS" ]; then
         local -a extra=()
         read -ra extra <<<"$EXTRA_PKGS"
         emerge_optional "the selected native packages" "${extra[@]}"
     fi
-    if [[ $WANT_FLATPAK != "yes" ]]; then return 0; fi
+    if [ "$WANT_FLATPAK" != "yes" ]; then return 0; fi
 
     emerge_optional "Flatpak" sys-apps/flatpak
     if ! have flatpak; then
@@ -3362,24 +3739,24 @@ c_software() {
     read -ra apps <<<"$FLATPAK_APPS"
     mkdir -p /usr/local/sbin
     {
-        echo "#!/bin/sh"
-        echo "# Adds Flathub and installs the Flatpak apps chosen during installation."
-        echo "# Written by gentoo-install.sh. Safe to run again."
-        echo "set -e"
-        echo "flatpak remote-add --if-not-exists flathub ${FLATHUB_URL}"
-        if (( ${#apps[@]} > 0 )); then echo "flatpak install -y --noninteractive flathub ${apps[*]}"; fi
-    } >/usr/local/sbin/install-my-flatpaks
-    chmod 755 /usr/local/sbin/install-my-flatpaks
+        printf '%s\n' "#!/bin/sh"
+        printf '%s\n' "# Adds Flathub and installs the Flatpak apps chosen during installation."
+        printf '%s\n' "# Written by gentoo_install.sh. Safe to run again."
+        printf '%s\n' "set -e"
+        printf '%s\n' "flatpak remote-add --if-not-exists flathub ${FLATHUB_URL}"
+        if (( ${#apps[@]} > 0 )); then printf '%s\n' "flatpak install -y --noninteractive flathub ${apps[*]}"; fi
+    } >/usr/local/sbin/install_my_flatpaks
+    chmod 755 /usr/local/sbin/install_my_flatpaks
 
     if ! run flatpak remote-add --if-not-exists flathub "$FLATHUB_URL"; then
-        warn "Could not add Flathub inside the installer. Run '${PRIV_TOOL} /usr/local/sbin/install-my-flatpaks' after the first boot."
+        warn "Could not add Flathub inside the installer. Run '${PRIV_TOOL} /usr/local/sbin/install_my_flatpaks' after the first boot."
         touch /root/.gentoo-install-flatpak-pending
         return 0
     fi
     if (( ${#apps[@]} > 0 )); then
         info "Installing Flatpak apps: ${apps[*]} (large downloads; the first app also pulls in its runtime)."
         if ! run flatpak install -y --noninteractive flathub "${apps[@]}"; then
-            warn "Some Flatpak apps could not be installed inside the installer. Run '${PRIV_TOOL} /usr/local/sbin/install-my-flatpaks' after the first boot."
+            warn "Some Flatpak apps could not be installed inside the installer. Run '${PRIV_TOOL} /usr/local/sbin/install_my_flatpaks' after the first boot."
             touch /root/.gentoo-install-flatpak-pending
         fi
     fi
@@ -3388,7 +3765,7 @@ c_software() {
 c_services() {
     step_header "Enable services" \
         "Services are programs that start at boot and run in the background (networking, login screen, logging and so on). This step turns on the ones this system needs."
-    if [[ $INIT == "systemd" ]]; then
+    if [ "$INIT" = "systemd" ]; then
         run systemctl preset-all --preset-mode=enable-only
         enable_service systemd-timesyncd
     else
@@ -3406,33 +3783,51 @@ c_services() {
             ;;
     esac
 
-    if [[ $DE != "none" && $INIT == "openrc" ]]; then
+    if [ "$DE" != "none" ] && [ "$INIT" = "openrc" ]; then
         enable_service dbus
         enable_service --boot elogind
-        if [[ $DE == "gnome" ]]; then enable_service openrc-settingsd; fi
+        if [ "$DE" = "gnome" ]; then enable_service openrc-settingsd; fi
     fi
-    if [[ $DM != "none" ]]; then
-        if [[ $INIT == "openrc" ]]; then enable_service display-manager; else enable_service "$DM"; fi
+    if [ "$DM" != "none" ]; then
+        if [ "$INIT" = "openrc" ]; then enable_service display-manager; else enable_service "$DM"; fi
     fi
-    if [[ $WANT_BT == "yes" ]]; then enable_service bluetooth; fi
-    if [[ $WANT_CUPS == "yes" ]]; then
-        if [[ $INIT == "openrc" ]]; then enable_service cupsd; else enable_service cups.socket cups; fi
+    if [ "$WANT_BT" = "yes" ]; then enable_service bluetooth; fi
+    if [ "$WANT_CUPS" = "yes" ]; then
+        if [ "$INIT" = "openrc" ]; then enable_service cupsd; else enable_service cups.socket cups; fi
     fi
-    if [[ $WANT_SSH == "yes" ]]; then enable_service sshd; fi
+    if [ "$WANT_SSH" = "yes" ]; then enable_service sshd; fi
     case "$VIRT" in
         kvm)
             enable_service qemu-guest-agent qemu-ga
-            if [[ $DE != "none" ]]; then enable_service spice-vdagentd spice-vdagent; fi
+            if [ "$DE" != "none" ]; then enable_service spice-vdagentd spice-vdagent; fi
             ;;
         vmware) enable_service vmtoolsd vmware-tools open-vm-tools ;;
         virtualbox) enable_service virtualbox-guest-additions vboxservice ;;
     esac
-    if [[ $SWAP_MODE == "zram" ]]; then
-        if [[ $INIT == "openrc" ]]; then enable_service local; else enable_service zram-swap; fi
+    if [ "$SWAP_MODE" = "zram" ]; then
+        if [ "$INIT" = "openrc" ]; then enable_service local; else enable_service zram_swap; fi
     fi
-    if [[ $IS_SSD == "yes" && $INIT == "systemd" ]]; then enable_service fstrim.timer; fi
+    if [ "$IS_SSD" = "yes" ] && [ "$INIT" = "systemd" ]; then enable_service fstrim.timer; fi
+    if [ "$WANT_POWER" = "yes" ]; then
+        if [ "$POWER_TOOL" = "ppd" ]; then
+            enable_service power-profiles-daemon
+        else
+            enable_service tlp
+            if [ "$INIT" = "systemd" ] && [ -e /usr/lib/systemd/system/tlp.service ]; then
+                # TLP handles the radio switches itself, as its documentation asks.
+                run systemctl mask systemd-rfkill.service systemd-rfkill.socket || true
+            fi
+        fi
+        if [ "$CPU_VENDOR" = "GenuineIntel" ]; then enable_service thermald; fi
+    fi
+    if [ "$HYBRID_GPU" = "yes" ]; then
+        case "$DE" in
+            plasma|gnome) enable_service switcheroo-control ;;
+        esac
+    fi
+    if [ "$WANT_MBPFAN" = "yes" ]; then enable_service mbpfan; fi
 
-    if [[ $INIT == "systemd" && $DE != "none" ]]; then
+    if [ "$INIT" = "systemd" ] && [ "$DE" != "none" ]; then
         info "Enabling PipeWire audio for all users (systemd user services)."
         if ! run systemctl --global enable pipewire.socket pipewire-pulse.socket; then
             warn "Could not enable the PipeWire sockets globally."
@@ -3446,7 +3841,7 @@ c_services() {
 c_bootloader_final() {
     step_header "Finish the bootloader configuration" \
         "Regenerates the boot menu now that everything is installed and checks that the kernel is in it."
-    if [[ $BOOTLOADER == "grub" ]]; then
+    if [ "$BOOTLOADER" = "grub" ]; then
         run grub-mkconfig -o /boot/grub/grub.cfg
         if ! grep -Eq '^[[:space:]]*linux[[:space:]]' /boot/grub/grub.cfg; then
             warn "The GRUB menu has no Linux entry. Reinstalling the kernel and trying again."
@@ -3466,7 +3861,10 @@ c_bootloader_final() {
             fi
         fi
         ok "systemd-boot entries:"
-        find /efi/loader/entries -name '*.conf' -printf '    %f\n'
+        local entry
+        for entry in /efi/loader/entries/*.conf; do
+            if [ -e "$entry" ]; then printf '    %s\n' "${entry##*/}"; fi
+        done
     fi
 }
 
@@ -3475,50 +3873,50 @@ setup_user_desktop() {
     case "$DE" in
         sway)
             cfg="$home/.config/sway/config"
-            if [[ ! -f $cfg && -f /etc/sway/config ]]; then
-                mkdir -p "$home/.config/sway"
+            if [ ! -f "$cfg" ] && [ -f /etc/sway/config ]; then
+                mkdir -p -- "$home/.config/sway"
                 cp /etc/sway/config "$cfg"
                 # shellcheck disable=SC2016  # $menu is a Sway variable, not a shell one
-                sed -i 's/^set \$menu .*/set $menu wofi --show drun/' "$cfg"
+                sed_inplace 's/^set \$menu .*/set $menu wofi --show drun/' "$cfg"
                 {
-                    echo ""
-                    echo "# ---- Added by gentoo-install.sh ----"
-                    if [[ $XKB_LAYOUT != "us" || -n $XKB_VARIANT ]]; then
-                        echo "input type:keyboard {"
-                        echo "    xkb_layout ${XKB_LAYOUT}"
-                        if [[ -n $XKB_VARIANT ]]; then echo "    xkb_variant ${XKB_VARIANT}"; fi
-                        echo "}"
+                    printf '%s\n' ""
+                    printf '%s\n' "# ---- Added by gentoo_install.sh ----"
+                    if [ "$XKB_LAYOUT" != "us" ] || [ -n "$XKB_VARIANT" ]; then
+                        printf '%s\n' "input type:keyboard {"
+                        printf '%s\n' "    xkb_layout ${XKB_LAYOUT}"
+                        if [ -n "$XKB_VARIANT" ]; then printf '%s\n' "    xkb_variant ${XKB_VARIANT}"; fi
+                        printf '%s\n' "}"
                     fi
-                    echo "# Notifications"
-                    echo "exec mako"
-                    if [[ $INIT == "openrc" ]]; then
-                        echo "# OpenRC has no per-user service manager, so start PipeWire (audio) here."
-                        echo "exec gentoo-pipewire-launcher"
+                    printf '%s\n' "# Notifications"
+                    printf '%s\n' "exec mako"
+                    if [ "$INIT" = "openrc" ]; then
+                        printf '%s\n' "# OpenRC has no per-user service manager, so start PipeWire (audio) here."
+                        printf '%s\n' "exec gentoo-pipewire-launcher"
                     fi
                 } >>"$cfg"
             fi
-            if [[ $SWAY_AUTOSTART == "yes" ]]; then
-                if [[ $GPU_DRIVER == "nvidia" ]]; then flag=" --unsupported-gpu"; fi
+            if [ "$SWAY_AUTOSTART" = "yes" ]; then
+                if [ "$GPU_DRIVER" = "nvidia" ]; then flag=" --unsupported-gpu"; fi
                 write_sway_autostart "$home" "$flag"
             fi
             ;;
         i3)
             cfg="$home/.config/i3/config"
-            if [[ ! -f $cfg && -f /etc/i3/config ]]; then
-                mkdir -p "$home/.config/i3"
+            if [ ! -f "$cfg" ] && [ -f /etc/i3/config ]; then
+                mkdir -p -- "$home/.config/i3"
                 cp /etc/i3/config "$cfg"
-                if [[ $INIT == "openrc" ]]; then
+                if [ "$INIT" = "openrc" ]; then
                     {
-                        echo ""
-                        echo "# ---- Added by gentoo-install.sh ----"
-                        echo "# OpenRC has no per-user service manager, so start PipeWire (audio) here."
-                        echo "exec --no-startup-id gentoo-pipewire-launcher"
+                        printf '%s\n' ""
+                        printf '%s\n' "# ---- Added by gentoo_install.sh ----"
+                        printf '%s\n' "# OpenRC has no per-user service manager, so start PipeWire (audio) here."
+                        printf '%s\n' "exec --no-startup-id gentoo-pipewire-launcher"
                     } >>"$cfg"
                 fi
             fi
             ;;
     esac
-    if [[ -d $home ]]; then chown -R "${USERNAME}:" "$home"; fi
+    if [ -d "$home" ]; then chown -R -- "${USERNAME}:" "$home"; fi
 }
 
 write_notes() {
@@ -3528,7 +3926,7 @@ write_notes() {
         cat <<EOF
 Gentoo post-install notes
 =========================
-Written by gentoo-install.sh ${SCRIPT_VERSION} on $(date -u '+%Y-%m-%d').
+Written by gentoo_install.sh ${SCRIPT_VERSION} on $(date -u '+%Y-%m-%d').
 
 Your system
 -----------
@@ -3537,16 +3935,16 @@ Your system
   Profile:           ${profile}
   Kernel:            sys-kernel/${KERNEL_PKG} (distribution kernel)
   Bootloader:        ${BOOTLOADER} (${BOOT_MODE^^})
-  Root filesystem:   ${FS}$( [[ $ENCRYPT == yes ]] && echo " on LUKS2 encryption" )
+  Root filesystem:   ${FS}$( [ "$ENCRYPT" = yes ] && printf '%s' " on LUKS2 encryption" )
   Compiler flags:    -march=native -O2 -pipe
   MAKEOPTS:          -j${MAKE_JOBS} -l${NPROC}
   Binary packages:   ${USE_BINPKG}
   Portage config:    /etc/portage/make.conf (every setting is explained in comments)
   Install logs:      /var/log/gentoo-install.log and /var/log/gentoo-install-live.log
 
-The easy way: gentoo-helper
+The easy way: gentoo_helper
 ---------------------------
-Open a terminal and run:  gentoo-helper
+Open a terminal and run:  gentoo_helper
 It gives you menus to update the system, find and install software (ready-made
 or compiled), remove packages, clean up, read Gentoo news and review
 configuration updates. It shows what it will do and asks before doing it, and
@@ -3578,13 +3976,13 @@ Installing software
   emerge -av <category/package>   # install one
   equery uses <package>           # show a package's USE flags (gentoolkit)
 EOF
-        if [[ $NET_TOOL == "networkmanager" ]]; then
+        if [ "$NET_TOOL" = "networkmanager" ]; then
             printf '\nNetworking\n----------\nNetworkManager is enabled. Connect to Wi-Fi from the desktop network icon, or\nin a terminal with: nmtui\n'
         fi
-        if [[ $WANT_FLATPAK == "yes" ]]; then
+        if [ "$WANT_FLATPAK" = "yes" ]; then
             printf '\nFlatpak\n-------\n  flatpak search <name>\n  flatpak install flathub <app-id>\n  flatpak update            # Flatpaks update separately from emerge\n'
-            if [[ -e /root/.gentoo-install-flatpak-pending ]]; then
-                printf '\nYour chosen Flatpak apps were not (all) installed during setup. After the first\nboot, connected to the internet, run:  %s /usr/local/sbin/install-my-flatpaks\n' "$PRIV_TOOL"
+            if [ -e /root/.gentoo-install-flatpak-pending ]; then
+                printf '\nYour chosen Flatpak apps were not (all) installed during setup. After the first\nboot, connected to the internet, run:  %s /usr/local/sbin/install_my_flatpaks\n' "$PRIV_TOOL"
             fi
         fi
         local login_sh
@@ -3594,27 +3992,40 @@ EOF
             fish|nu) printf 'This shell does not read /etc/profile. If a program is missing from PATH or an\nenvironment setting is not applied, add it to the shell'"'"'s own configuration.\n' ;;
             zsh) printf 'A starter ~/.zshrc was written (history, completion, the Gentoo prompt).\n' ;;
         esac
-        if [[ $DE == "sway" ]]; then
+        if [ "$DE" = "sway" ]; then
             printf '\nSway\n----\nSuper+Enter opens a terminal (foot), Super+d the app launcher (wofi),\nSuper+Shift+e exits. Your config: ~/.config/sway/config (man 5 sway).\n'
         fi
-        if [[ $DE == "i3" ]]; then
+        if [ "$DE" = "i3" ]; then
             # shellcheck disable=SC2016  # $mod is an i3 variable, not a shell one
             printf '\ni3\n--\nAlt+Enter opens a terminal, Alt+d the launcher (dmenu), Alt+Shift+e exits.\nYour config: ~/.config/i3/config. Change "set $mod Mod1" to Mod4 for the Super key.\n'
         fi
-        if [[ $DE == "gnome" && $INIT == "openrc" ]]; then
+        if [ "$DE" = "gnome" ] && [ "$INIT" = "openrc" ]; then
             printf '\nGNOME on OpenRC\n---------------\nGNOME is developed against systemd. If a Settings panel does not work, check the\nGentoo wiki page "GNOME" for the OpenRC notes.\n'
         fi
-        if [[ $GPU_DRIVER == "nvidia" ]]; then
+        if [ "$GPU_DRIVER" = "nvidia" ]; then
             printf '\nNVIDIA\n------\nThe proprietary driver is rebuilt automatically when the kernel updates.\nnvidia_drm.modeset=1 is set on the kernel command line (current drivers enable\nit by default; it matters for older branches and Wayland).\n'
-            if [[ $NVIDIA_GEN == "legacy580" ]]; then
+            if [ "$NVIDIA_GEN" = "legacy580" ]; then
                 printf 'This card is supported up to the 580 driver branch, so newer branches are\nblocked in /etc/portage/package.mask/gentoo-install and updates stay on 580.\n'
             else
                 printf 'If the card stops working after a driver update, see the Gentoo wiki page\n"NVIDIA/nvidia-drivers".\n'
             fi
         fi
-        if [[ $DUAL_BOOT == "yes" ]]; then
+        if [ "$WANT_BCM_WL" = "yes" ]; then
+            printf '\nBroadcom Wi-Fi\n--------------\nThe wl driver (net-wireless/broadcom-sta) is a testing version, allowed in\n/etc/portage/package.accept_keywords/gentoo-install. It is rebuilt when the\nkernel updates. If Wi-Fi stops working after a kernel update, the driver may\nnot support that kernel yet: pick the previous kernel in the boot menu.\nThe open drivers that would claim the card are blocked in\n/etc/modprobe.d/broadcom-wl-blacklist.conf.\n'
+        fi
+        if [ "$WANT_MBPFAN" = "yes" ]; then
+            printf '\nMac fan control\n---------------\nmbpfan runs as a service and sets the fan speed from the CPU temperature.\nIts settings (temperatures, fan speeds) are in /etc/mbpfan.conf.\n'
+        fi
+        if [ "$WANT_POWER" = "yes" ]; then
+            if [ "$POWER_TOOL" = "ppd" ]; then
+                printf '\nPower management\n----------------\nSwitch between power saving, balanced and performance in the battery menu,\nor with: powerprofilesctl set power-saver|balanced|performance\n'
+            else
+                printf '\nPower management\n----------------\nTLP applies power saving settings at boot and when switching between battery\nand mains. Settings: /etc/tlp.conf. Status: tlp-stat -s\n'
+            fi
+        fi
+        if [ "$DUAL_BOOT" = "yes" ]; then
             printf '\nDual boot\n---------\n'
-            if [[ $BOOTLOADER == "grub" ]]; then
+            if [ "$BOOTLOADER" = "grub" ]; then
                 printf 'GRUB runs os-prober to add other systems to its menu. If one is missing,\nrun: grub-mkconfig -o /boot/grub/grub.cfg\n'
             else
                 printf 'systemd-boot lists Windows automatically if its boot loader is on the same\nEFI system partition. Other systems need a loader entry; see man loader.conf.\n'
@@ -3622,15 +4033,15 @@ EOF
             printf 'Windows keeps the hardware clock in local time, Linux in UTC. If the clock is\nwrong after switching systems, set Windows to use UTC (search "RealTimeIsUniversal").\n'
         fi
         printf '\nMoving this disk to another computer\n------------------------------------\nThe system is built for this CPU (-march=native) with a host-only initramfs.\nBefore moving the disk, change -march=native to a generic value such as\n-march=x86-64-v2 in make.conf, rebuild (emerge -e @world), set hostonly="no" in\n/etc/dracut.conf.d/10-gentoo-install.conf and run: emerge --config sys-kernel/%s\n' "$KERNEL_PKG"
-        if [[ -s $FAILED_PATH ]]; then
+        if [ -s "$FAILED_PATH" ]; then
             printf '\nOptional packages that failed to install\n----------------------------------------\n'
             sed 's/^/  /' "$FAILED_PATH"
             printf 'Try again with: emerge --ask <package> and read the error message.\n'
         fi
     } >"$f"
-    if id "$USERNAME" >/dev/null 2>&1 && [[ -d /home/$USERNAME ]]; then
-        cp "$f" "/home/${USERNAME}/${NOTES_NAME}"
-        chown "${USERNAME}:" "/home/${USERNAME}/${NOTES_NAME}"
+    if id "$USERNAME" >/dev/null 2>&1 && [ -d "/home/$USERNAME" ]; then
+        cp -- "$f" "/home/${USERNAME}/${NOTES_NAME}"
+        chown -- "${USERNAME}:" "/home/${USERNAME}/${NOTES_NAME}"
     fi
     ok "Wrote ${f}"
 }
@@ -3649,11 +4060,11 @@ c_finish() {
     setup_user_desktop
     if declare -F install_gentoo_helper >/dev/null; then
         install_gentoo_helper
-        ok "Installed gentoo-helper (/usr/local/bin/gentoo-helper): simple menus for installing software and updating the system."
+        ok "Installed gentoo_helper (/usr/local/bin/gentoo_helper): simple menus for installing software and updating the system."
     fi
     write_notes
     local news
-    news=$(eselect news count new 2>/dev/null || echo 0)
+    news=$(eselect news count new 2>/dev/null || printf '%s\n' 0)
     if [[ $news =~ ^[0-9]+$ ]] && (( news > 0 )); then
         info "There are ${news} unread Gentoo news items. Read them after booting with: eselect news read"
     fi
@@ -3662,16 +4073,16 @@ c_finish() {
 # Rough minimum free space (GiB) needed before a step starts.
 step_min_free_gib() {
     case "$1" in
-        c_world) echo 4 ;;
+        c_world) printf '%s\n' 4 ;;
         c_desktop)
             case "$DE" in
-                plasma|gnome|cinnamon) echo 8 ;;
-                none) echo 1 ;;
-                *) echo 4 ;;
+                plasma|gnome|cinnamon) printf '%s\n' 8 ;;
+                none) printf '%s\n' 1 ;;
+                *) printf '%s\n' 4 ;;
             esac ;;
-        c_software) echo 3 ;;
-        c_kernel|c_firmware|c_bootloader_prep|c_base_tools|c_hardware) echo 2 ;;
-        *) echo 1 ;;
+        c_software) printf '%s\n' 3 ;;
+        c_kernel|c_firmware|c_bootloader_prep|c_base_tools|c_hardware) printf '%s\n' 2 ;;
+        *) printf '%s\n' 1 ;;
     esac
 }
 
@@ -3691,20 +4102,21 @@ check_disk_space() {
         return 0
     fi
     say "Space used by the largest directories:"
-    du -xsh /usr /var /opt /home /root 2>/dev/null | sort -rh | sed 's/^/    /' || true
+    du -xsk /usr /var /opt /home /root 2>/dev/null | LC_ALL=C sort -rn \
+        | awk '{printf "    %6d MiB  %s\n", $1 / 1024, $2}' || true
     die "Not enough disk space: $(( avail_kib / 1024 )) MiB free, roughly ${need_gib} GiB needed for the next step. The disk (or root partition) is too small for this installation; ${MIN_DESKTOP_DISK_GIB} GiB or more is needed for a desktop. Enlarge it, or start over on a larger disk."
 }
 
 chroot_stage() {
     IN_CHROOT="yes"
     LOG="$TARGET_LOG"
-    mkdir -p "$(dirname "$LOG")"
-    touch "$LOG"
-    [[ -f $CONF_PATH ]] || die "The settings file ${CONF_PATH} is missing."
+    mkdir -p -- "$(dirname "$LOG")"
+    touch -- "$LOG"
+    [ -f "$CONF_PATH" ] || die "The settings file ${CONF_PATH} is missing."
     safe_source /etc/profile
     init_defaults
     load_config "$CONF_PATH"
-    touch "$PROGRESS_PATH"
+    touch -- "$PROGRESS_PATH"
     log "chroot stage started"
     info "While packages build, their compiler output goes to Portage's build logs instead of the screen; you will see one line per package. If a build fails, the relevant part of its log is shown."
     local total=${#CHROOT_STEPS[@]} i=0 s
@@ -3718,20 +4130,20 @@ chroot_stage() {
         check_disk_space "$s"
         ensure_blocking_stdio
         "$s"
-        echo "$s" >>"$PROGRESS_PATH"
+        printf '%s\n' "$s" >>"$PROGRESS_PATH"
         ok "Step ${CURRENT_STEP} finished."
     done
 }
 
 # ----------------------------------------------------------------------------
-# gentoo-helper, embedded by build.sh from gentoo-helper.sh (do not edit here)
+# gentoo_helper, embedded by build.sh from gentoo_helper.sh (do not edit here)
 # ----------------------------------------------------------------------------
 install_gentoo_helper() {
     mkdir -p /usr/local/bin
-    cat >/usr/local/bin/gentoo-helper <<'GENTOO_HELPER_SCRIPT_EOF'
+    cat >/usr/local/bin/gentoo_helper <<'GENTOO_HELPER_SCRIPT_EOF'
 #!/usr/bin/env bash
 # =============================================================================
-#  gentoo-helper - simple menus for everyday Gentoo package management
+#  gentoo_helper - simple menus for everyday Gentoo package management
 # =============================================================================
 #
 #  Install, remove and find software, update the whole system and keep it
@@ -3739,27 +4151,28 @@ install_gentoo_helper() {
 #  what is going to happen in plain words and asks before changing anything.
 #
 #  Install it:
-#    curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-helper.sh
-#    sudo install -m 755 gentoo-helper.sh /usr/local/bin/gentoo-helper
+#    curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo_helper.sh
+#    sudo install -m 755 gentoo_helper.sh /usr/local/bin/gentoo_helper
 #
 #  Use it:
-#    gentoo-helper                  menus
-#    gentoo-helper update           update the whole system
-#    gentoo-helper install NAME     find and install a package
-#    gentoo-helper remove NAME      remove a package
-#    gentoo-helper clean            remove unneeded packages, free disk space
-#    gentoo-helper news             read Gentoo news
-#    gentoo-helper configs          review configuration file updates
-#    gentoo-helper flatpak          Flatpak apps
-#    gentoo-helper tasks            common tasks: printing, Wi-Fi, drivers, SSH, ...
-#    gentoo-helper help             this text
+#    gentoo_helper                  menus
+#    gentoo_helper update           update the whole system
+#    gentoo_helper install NAME     find and install a package
+#    gentoo_helper remove NAME      remove a package
+#    gentoo_helper clean            remove unneeded packages, free disk space
+#    gentoo_helper news             read Gentoo news
+#    gentoo_helper configs          review configuration file updates
+#    gentoo_helper flatpak          Flatpak apps
+#    gentoo_helper tasks            common tasks: printing, Wi-Fi, drivers, SSH, ...
+#    gentoo_helper -h               this text
+#    gentoo_helper -V               version
 #
-#  Log: /var/log/gentoo-helper.log
+#  Needs bash 4.4 or newer. Log: /var/log/gentoo-helper.log
 # =============================================================================
 
-set -uo pipefail
+set -euo pipefail
 
-readonly VERSION="1.3.0"
+readonly VERSION="1.4.0"
 readonly LOG="/var/log/gentoo-helper.log"
 readonly STATE_DIR="/var/lib/gentoo-helper"
 readonly LAST_FAILURE="/var/log/gentoo-helper-last-failure.txt"
@@ -3790,7 +4203,7 @@ UI_BACK_LABEL="Back"
 WORK_DIR=""
 SR_NAME=(); SR_INST=(); SR_LATEST=(); SR_DESC=()
 
-if [[ -t 1 ]]; then
+if [ -t 1 ]; then
     C_RESET=$'\e[0m'; C_BOLD=$'\e[1m'; C_GREEN=$'\e[1;32m'; C_YELLOW=$'\e[1;33m'; C_BLUE=$'\e[1;34m'
 else
     C_RESET=""; C_BOLD=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""
@@ -3814,9 +4227,9 @@ trim() {
 
 term_width() {
     local w
-    w=$(tput cols 2>/dev/null || echo 80)
+    w=$(tput cols 2>/dev/null || printf '%s\n' 80)
     [[ $w =~ ^[0-9]+$ ]] || w=80
-    echo $(( w > 100 ? 100 : (w < 50 ? 50 : w) ))
+    printf '%s\n' $(( w > 100 ? 100 : (w < 50 ? 50 : w) ))
 }
 
 clear_screen() {
@@ -3838,11 +4251,54 @@ pause_text() {
 }
 
 tmpfile() {
-    mktemp "${WORK_DIR}/XXXXXX"
+    mktemp "${WORK_DIR}/tmp.XXXXXX"
+}
+
+# self_path: the absolute path of this script, without GNU readlink -f.
+self_path() {
+    local dir base
+    dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    base=$(basename -- "${BASH_SOURCE[0]}")
+    printf '%s/%s\n' "$dir" "$base"
+}
+
+# file_mtime FILE: modification time in seconds since 1970. stat's options
+# differ between GNU, BSD and BusyBox, so this asks Python, which Portage
+# always has.
+file_mtime() {
+    python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$1" 2>/dev/null
+}
+
+# sed_inplace SCRIPT FILE: edit FILE with sed, portably (no GNU sed -i).
+sed_inplace() {
+    local script=$1 file=$2 tmp
+    tmp=$(mktemp "${file}.XXXXXX")
+    if sed "$script" "$file" >"$tmp"; then
+        cat -- "$tmp" >"$file"
+        rm -f -- "$tmp"
+    else
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
+# strip_colors: remove terminal colour codes from standard input
+# (portable: no \x escapes in the sed script).
+strip_colors() {
+    local esc
+    esc=$(printf '\033')
+    sed "s/${esc}\[[0-9;]*m//g"
+}
+
+# clear_dir DIR: delete everything inside DIR, keeping DIR itself.
+clear_dir() {
+    if [ -d "$1" ]; then
+        find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+    fi
 }
 
 cleanup() {
-    if [[ -n $WORK_DIR && -d $WORK_DIR ]]; then rm -rf "$WORK_DIR"; fi
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then rm -rf -- "$WORK_DIR"; fi
 }
 
 # ----------------------------------------------------------------------------
@@ -3850,8 +4306,8 @@ cleanup() {
 # ----------------------------------------------------------------------------
 ui_dims() {
     local h w
-    h=$(tput lines 2>/dev/null || echo 24)
-    w=$(tput cols 2>/dev/null || echo 80)
+    h=$(tput lines 2>/dev/null || printf '%s\n' 24)
+    w=$(tput cols 2>/dev/null || printf '%s\n' 80)
     [[ $h =~ ^[0-9]+$ ]] || h=24
     [[ $w =~ ^[0-9]+$ ]] || w=80
     UI_MAXH=$(( h - 4 ))
@@ -3872,11 +4328,11 @@ dlg() {
     OUT=$(dialog --cr-wrap --no-collapse \
         --backtitle "Gentoo Helper ${VERSION}   |   Arrows: move   Space: tick   Enter: choose   Esc: back" \
         --title " ${TITLE} " "$@" 3>&1 1>&2 2>&3) || rc=$?
-    if (( rc != 0 )) && { [[ -n $OUT ]] || (( rc != 1 && rc != 255 )); }; then
+    if (( rc != 0 )) && { [ -n "$OUT" ] || (( rc != 1 && rc != 255 )); }; then
         log "dialog failed (rc=${rc}): ${OUT}"
         UI="text"
         clear_screen
-        echo "The menu program failed (${OUT:-exit code ${rc}}). Switching to plain text menus."
+        printf '%s\n' "The menu program failed (${OUT:-exit code ${rc}}). Switching to plain text menus."
         return 99
     fi
     return "$rc"
@@ -3896,7 +4352,7 @@ ui_menu() {
     shift 2
     local -a items=("$@")
     local n=$(( ${#items[@]} / 2 )) rc i
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local maxl=20 lines lh h w
         ui_dims
         for (( i = 1; i < ${#items[@]}; i += 2 )); do
@@ -3910,10 +4366,10 @@ ui_menu() {
         lh=$(( lh < 3 ? 3 : lh ))
         h=$(( lines + lh + 7 ))
         h=$(( h > UI_MAXH ? UI_MAXH : h ))
+        rc=0
         dlg --no-tags --cancel-label "$UI_BACK_LABEL" --default-item "$def" \
-            --menu "$text" "$h" "$w" "$lh" "${items[@]}"
-        rc=$?
-        if (( rc == 99 )); then ui_menu "$text" "$def" "${items[@]}"; return $?; fi
+            --menu "$text" "$h" "$w" "$lh" "${items[@]}" || rc=$?
+        if (( rc == 99 )); then ui_menu "$text" "$def" "${items[@]}" && return 0; return 1; fi
         if (( rc == 0 )); then CHOICE=$OUT; return 0; fi
         return 1
     fi
@@ -3921,53 +4377,53 @@ ui_menu() {
     local -a tags=()
     text_header
     say "$text"
-    echo
+    printf '\n'
     for (( i = 0; i < ${#items[@]}; i += 2 )); do
         num=$(( num + 1 ))
         tags+=("${items[i]}")
-        if [[ ${items[i]} == "$def" ]]; then defnum=$num; fi
+        if [ "${items[i]}" = "$def" ]; then defnum=$num; fi
         printf '  %2d) %s\n' "$num" "${items[i+1]}"
     done
     printf '   0) %s\n' "$UI_BACK_LABEL"
     while true; do
-        if ! read -r -p "  Choose a number [${defnum}]: " a; then echo; return 1; fi
+        if ! read -r -p "  Choose a number [${defnum}]: " a; then printf '\n'; return 1; fi
         a=$(trim "${a:-$defnum}")
-        if [[ $a == "0" ]]; then return 1; fi
+        if [ "$a" = "0" ]; then return 1; fi
         if [[ $a =~ ^[0-9]+$ ]] && (( a >= 1 && a <= num )); then
             CHOICE=${tags[a-1]}
             return 0
         fi
-        echo "  Please enter a number from the list."
+        printf '%s\n' "  Please enter a number from the list."
     done
 }
 
 # ui_yesno "text" [y|n]  ->  returns 0 for yes
 ui_yesno() {
     local text=$1 def=${2:-y} rc a hint="Y/n"
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local lines h
         local -a extra=()
         ui_dims
-        if [[ $def == "n" ]]; then extra=(--defaultno); fi
+        if [ "$def" = "n" ]; then extra=(--defaultno); fi
         lines=$(text_lines "$text" $(( UI_W - 4 )))
         h=$(( lines + 6 ))
         h=$(( h > UI_MAXH ? UI_MAXH : h ))
-        dlg "${extra[@]}" --yesno "$text" "$h" "$UI_W"
-        rc=$?
-        if (( rc == 99 )); then ui_yesno "$text" "$def"; return $?; fi
+        rc=0
+        dlg "${extra[@]}" --yesno "$text" "$h" "$UI_W" || rc=$?
+        if (( rc == 99 )); then ui_yesno "$text" "$def" && return 0; return 1; fi
         return $(( rc == 0 ? 0 : 1 ))
     fi
-    if [[ $def == "n" ]]; then hint="y/N"; fi
-    echo
+    if [ "$def" = "n" ]; then hint="y/N"; fi
+    printf '\n'
     say "$text"
     while true; do
-        if ! read -r -p "  [${hint}]: " a; then echo; return 1; fi
+        if ! read -r -p "  [${hint}]: " a; then printf '\n'; return 1; fi
         a=$(trim "${a:-$def}")
         case "${a,,}" in
             y|yes) return 0 ;;
             n|no) return 1 ;;
         esac
-        echo "  Please answer y or n."
+        printf '%s\n' "  Please answer y or n."
     done
 }
 
@@ -3978,7 +4434,7 @@ ui_checklist() {
     shift
     local -a items=("$@")
     local n=$(( ${#items[@]} / 3 ))
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local maxl=20 lines lh h w
         ui_dims
         for (( i = 1; i < ${#items[@]}; i += 3 )); do
@@ -3993,9 +4449,9 @@ ui_checklist() {
         lh=$(( lh < 3 ? 3 : lh ))
         h=$(( lines + lh + 7 ))
         h=$(( h > UI_MAXH ? UI_MAXH : h ))
-        dlg --separate-output --no-tags --cancel-label "Back" --checklist "$text" "$h" "$w" "$lh" "${items[@]}"
-        rc=$?
-        if (( rc == 99 )); then ui_checklist "$1" "${items[@]}"; return $?; fi
+        rc=0
+        dlg --separate-output --no-tags --cancel-label "Back" --checklist "$text" "$h" "$w" "$lh" "${items[@]}" || rc=$?
+        if (( rc == 99 )); then ui_checklist "$1" "${items[@]}" && return 0; return 1; fi
         if (( rc != 0 )); then return 1; fi
         CHOICE=$(trim "$(tr '\n' ' ' <<<"$OUT")")
         return 0
@@ -4008,27 +4464,27 @@ ui_checklist() {
     while true; do
         text_header
         say "$text"
-        echo
+        printf '\n'
         for (( i = 0; i < n; i++ )); do
-            if [[ ${state[i]} == "on" ]]; then t="x"; else t=" "; fi
+            if [ "${state[i]}" = "on" ]; then t="x"; else t=" "; fi
             printf '  %2d) [%s] %s\n' $(( i + 1 )) "$t" "${items[i*3+1]}"
         done
-        echo
-        if ! read -r -p "  Numbers to tick/untick (e.g. 2 4), Enter to continue, 0 to go back: " a; then echo; return 1; fi
+        printf '\n'
+        if ! read -r -p "  Numbers to tick/untick (e.g. 2 4), Enter to continue, 0 to go back: " a; then printf '\n'; return 1; fi
         a=$(trim "$a")
-        if [[ -z $a ]]; then break; fi
-        if [[ $a == "0" ]]; then return 1; fi
+        if [ -z "$a" ]; then break; fi
+        if [ "$a" = "0" ]; then return 1; fi
         local -a picks=()
         read -ra picks <<<"$a"
         for t in "${picks[@]}"; do
             if [[ $t =~ ^[0-9]+$ ]] && (( t >= 1 && t <= n )); then
-                if [[ ${state[t-1]} == "on" ]]; then state[t-1]="off"; else state[t-1]="on"; fi
+                if [ "${state[t-1]}" = "on" ]; then state[t-1]="off"; else state[t-1]="on"; fi
             fi
         done
     done
     CHOICE=""
     for (( i = 0; i < n; i++ )); do
-        if [[ ${state[i]} == "on" ]]; then CHOICE+="${CHOICE:+ }${tags[i]}"; fi
+        if [ "${state[i]}" = "on" ]; then CHOICE+="${CHOICE:+ }${tags[i]}"; fi
     done
     return 0
 }
@@ -4036,42 +4492,42 @@ ui_checklist() {
 # ui_input "text" "default"  ->  CHOICE. Returns 1 when cancelled or left empty.
 ui_input() {
     local text=$1 def=${2:-} rc a
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local lines h
         ui_dims
         lines=$(text_lines "$text" $(( UI_W - 4 )))
         h=$(( lines + 8 ))
         h=$(( h > UI_MAXH ? UI_MAXH : h ))
-        dlg --inputbox "$text" "$h" "$UI_W" "$def"
-        rc=$?
-        if (( rc == 99 )); then ui_input "$text" "$def"; return $?; fi
+        rc=0
+        dlg --inputbox "$text" "$h" "$UI_W" "$def" || rc=$?
+        if (( rc == 99 )); then ui_input "$text" "$def" && return 0; return 1; fi
         if (( rc != 0 )); then return 1; fi
         CHOICE=$(trim "$OUT")
     else
-        echo
+        printf '\n'
         say "$text" "(Leave empty to go back.)"
-        if ! read -r -p "  > " a; then echo; return 1; fi
+        if ! read -r -p "  > " a; then printf '\n'; return 1; fi
         CHOICE=$(trim "${a:-$def}")
     fi
-    [[ -n $CHOICE ]]
+    [ -n "$CHOICE" ]
 }
 
 # ui_file FILE: show a (long) text file, scrollable
 ui_file() {
     local f=$1 rc
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         ui_dims
         local wrapped
         wrapped=$(tmpfile)
         fold -s -w $(( UI_W - 4 )) "$f" >"$wrapped"
-        dlg --exit-label "OK" --textbox "$wrapped" "$UI_MAXH" "$UI_W"
-        rc=$?
+        rc=0
+        dlg --exit-label "OK" --textbox "$wrapped" "$UI_MAXH" "$UI_W" || rc=$?
         if (( rc == 99 )); then ui_file "$f"; fi
         return 0
     fi
-    echo
-    if have less && (( $(wc -l <"$f") > 20 )); then
-        less -R "$f"
+    printf '\n'
+    if have less && [ "$(wc -l <"$f")" -gt 20 ]; then
+        less -R "$f" || true
     else
         sed 's/^/  /' "$f"
         pause_text
@@ -4081,7 +4537,7 @@ ui_file() {
 # ui_msg "text": a message box (scrollable when long)
 ui_msg() {
     local text=$1 rc
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         local lines
         ui_dims
         lines=$(text_lines "$text" $(( UI_W - 4 )))
@@ -4092,24 +4548,24 @@ ui_msg() {
             ui_file "$f"
             return 0
         fi
-        dlg --msgbox "$text" $(( lines + 6 )) "$UI_W"
-        rc=$?
+        rc=0
+        dlg --msgbox "$text" $(( lines + 6 )) "$UI_W" || rc=$?
         if (( rc == 99 )); then ui_msg "$text"; fi
         return 0
     fi
-    echo
+    printf '\n'
     say "$text"
     pause_text
 }
 
 # busy "text": a short "please wait" note while something runs
 busy() {
-    if [[ $UI == "dialog" ]]; then
+    if [ "$UI" = "dialog" ]; then
         ui_dims
         dialog --backtitle "Gentoo Helper ${VERSION}" --title " ${TITLE} " \
             --infobox "$1" $(( $(text_lines "$1" $(( UI_W - 4 ))) + 4 )) "$UI_W" 2>/dev/null || true
     else
-        echo
+        printf '\n'
         say "$1"
     fi
 }
@@ -4123,10 +4579,10 @@ run_visible() {
     clear_screen
     printf '%s==>%s %s\n\n' "$C_GREEN" "$C_RESET" "$*"
     log "RUN: $*"
-    "$@" 2>&1 | tee -a "$LOG"
-    local rc=${PIPESTATUS[0]}
+    local rc=0
+    "$@" 2>&1 | tee -a "$LOG" || rc=${PIPESTATUS[0]}
     log "EXIT ${rc}: $*"
-    echo
+    printf '\n'
     return "$rc"
 }
 
@@ -4138,10 +4594,10 @@ run_emerge() {
     printf '%s==>%s emerge %s\n' "$C_GREEN" "$C_RESET" "$*"
     printf '    Compiler output goes to each package'"'"'s build log; progress is shown here.\n\n'
     log "RUN: emerge ${RUN_OPTS[*]} $*"
-    emerge "${RUN_OPTS[@]}" "$@" 2>&1 | tee -a "$LOG" "$RUN_TMP"
-    rc=${PIPESTATUS[0]}
+    rc=0
+    emerge "${RUN_OPTS[@]}" "$@" 2>&1 | tee -a "$LOG" "$RUN_TMP" || rc=${PIPESTATUS[0]}
     log "EXIT ${rc}: emerge $*"
-    echo
+    printf '\n'
     if (( rc == 0 )); then
         printf '%sDone.%s\n' "$C_GREEN" "$C_RESET"
         pause_text
@@ -4160,48 +4616,48 @@ failure_help() {
     blog=${blog#*located at \'}
     blog=${blog%\'}
     {
-        echo "WHAT WENT WRONG"
-        echo "==============="
-        echo
+        printf '%s\n' "WHAT WENT WRONG"
+        printf '%s\n' "==============="
+        printf '\n'
         if grep -q "No space left on device" "$RUN_TMP" "${blog:-/dev/null}" 2>/dev/null; then
-            echo "* The disk is full. Use 'Maintenance > Free disk space', then try again."
-            echo
+            printf '%s\n' "* The disk is full. Use 'Maintenance > Free disk space', then try again."
+            printf '\n'
         fi
         if grep -qE "Couldn't download|Fetch failed|Unable to download|Could not resolve host" "$RUN_TMP" 2>/dev/null; then
-            echo "* A download failed. Check the internet connection and try again; mirrors"
-            echo "  are sometimes briefly unavailable."
-            echo
+            printf '%s\n' "* A download failed. Check the internet connection and try again; mirrors"
+            printf '%s\n' "  are sometimes briefly unavailable."
+            printf '\n'
         fi
-        if [[ -n $blog && -r $blog ]]; then
+        if [ -n "$blog" ] && [ -r "$blog" ]; then
             if grep -q "Can't locate .*\.pm in @INC" "$blog" 2>/dev/null; then
-                echo "* A Perl module could not be loaded, which usually happens after a Perl"
-                echo "  upgrade. Use 'Maintenance > Rebuild Perl modules', then try again."
-                echo
+                printf '%s\n' "* A Perl module could not be loaded, which usually happens after a Perl"
+                printf '%s\n' "  upgrade. Use 'Maintenance > Rebuild Perl modules', then try again."
+                printf '\n'
             fi
             errors=$(grep -nE "\*\*\* \[|error:|Error [0-9]+|Can't locate|No such file or directory|Illegal instruction|Segmentation fault|Killed|undefined reference|command not found" "$blog" 2>/dev/null \
                 | grep -vE "^[0-9]+:(checking|configure:)|-Werror|-Wno-error" || true)
             first=${errors%%:*}
-            echo "The package's build log: ${blog}"
+            printf '%s\n' "The package's build log: ${blog}"
             if [[ $first =~ ^[0-9]+$ ]]; then
                 from=$(( first > 12 ? first - 12 : 1 ))
-                echo
-                echo "Where it first went wrong (the cause is usually just above the first"
-                echo "line with '***' or 'error'):"
-                echo
+                printf '\n'
+                printf '%s\n' "Where it first went wrong (the cause is usually just above the first"
+                printf '%s\n' "line with '***' or 'error'):"
+                printf '\n'
                 sed -n "${from},$(( first + 3 ))p" "$blog"
             fi
-            echo
-            echo "Last lines of the build log:"
-            echo
+            printf '\n'
+            printf '%s\n' "Last lines of the build log:"
+            printf '\n'
             tail -n 25 "$blog"
         else
-            echo "Last lines of emerge's output:"
-            echo
+            printf '%s\n' "Last lines of emerge's output:"
+            printf '\n'
             tail -n 40 "$RUN_TMP"
         fi
-        echo
-        echo "This report is saved as ${LAST_FAILURE}. If you ask for help (for example"
-        echo "on forums.gentoo.org), include it together with the output of: emerge --info"
+        printf '\n'
+        printf '%s\n' "This report is saved as ${LAST_FAILURE}. If you ask for help (for example"
+        printf '%s\n' "on forums.gentoo.org), include it together with the output of: emerge --info"
     } >"$LAST_FAILURE"
     TITLE="What went wrong"
     ui_file "$LAST_FAILURE"
@@ -4214,8 +4670,8 @@ failure_help() {
 # make_plan ARGS...: calculate (without changing anything) into PLAN_OUT/PLAN_RC
 make_plan() {
     busy "Working out what needs to be done. This can take a minute..."
-    PLAN_OUT=$(emerge "${PLAN_OPTS[@]}" "$@" 2>&1)
-    PLAN_RC=$?
+    PLAN_RC=0
+    PLAN_OUT=$(emerge "${PLAN_OPTS[@]}" "$@" 2>&1) || PLAN_RC=$?
     log "PLAN rc=${PLAN_RC}: emerge $*"
     printf '%s\n' "$PLAN_OUT" >>"$LOG" 2>/dev/null || true
 }
@@ -4245,7 +4701,7 @@ plan_list() {
 count_lines() {
     local c
     c=$(grep -c "$1" <<<"$PLAN_OUT" || true)
-    echo "${c:-0}"
+    printf '%s\n' "${c:-0}"
 }
 
 # confirm_plan "what this is": show the plan and ask. Returns 1 when the user
@@ -4253,14 +4709,14 @@ count_lines() {
 confirm_plan() {
     local what=$1 list nbin nsrc total text f
     list=$(plan_list)
-    if [[ -z $list ]]; then return 3; fi
+    if [ -z "$list" ]; then return 3; fi
     nbin=$(count_lines '^\[binary')
     nsrc=$(count_lines '^\[ebuild')
     total=$(grep -m1 '^Total:' <<<"$PLAN_OUT" || true)
     text="${what}"$'\n\n'"Packages: $(( nbin + nsrc ))"$'\n'
     text+="  ready-made (downloaded, installs quickly): ${nbin}"$'\n'
     text+="  compiled on this computer:                 ${nsrc}"$'\n'
-    if [[ -n $total ]]; then text+=$'\n'"Portage's summary: ${total}"$'\n'; fi
+    if [ -n "$total" ]; then text+=$'\n'"Portage's summary: ${total}"$'\n'; fi
     if (( nsrc > 0 )); then
         text+=$'\n'"Compiling takes from under a minute for small packages to hours for big ones (web browsers, office suites, compilers). You can keep using the computer meanwhile."$'\n'
     fi
@@ -4272,8 +4728,8 @@ confirm_plan() {
     fi
     f=$(tmpfile)
     {
-        echo "How      What       Package"
-        echo "$list"
+        printf '%s\n' "How      What       Package"
+        printf '%s\n' "$list"
     } >"$f"
     while true; do
         if ! ui_menu "$text" "go" go "Start" list "Show the list of packages" cancel "Cancel"; then return 1; fi
@@ -4298,16 +4754,16 @@ extract_changes() {
 add_settings() {
     local file=$1 lines=$2 reason=$3 dir line existing="" new=""
     dir=${file%/*}
-    if [[ -f $dir ]]; then file=$dir; fi
-    if [[ ! -e $dir ]]; then mkdir -p "$dir"; fi
-    if [[ -f $file ]]; then existing=$(<"$file"); fi
+    if [ -f "$dir" ]; then file=$dir; fi
+    if [ ! -e "$dir" ]; then mkdir -p -- "$dir"; fi
+    if [ -f "$file" ]; then existing=$(<"$file"); fi
     while IFS= read -r line; do
         line=$(trim "$line")
-        if [[ -z $line ]]; then continue; fi
+        if [ -z "$line" ]; then continue; fi
         if ! grep -qxF -- "$line" <<<"$existing"; then new+="${line}"$'\n'; fi
     done <<<"$lines"
-    if [[ -z $new ]]; then return 0; fi
-    printf '\n# Added by gentoo-helper on %s: %s\n%s' "$(date '+%Y-%m-%d')" "$reason" "$new" >>"$file"
+    if [ -z "$new" ]; then return 0; fi
+    printf '\n# Added by gentoo_helper on %s: %s\n%s' "$(date '+%Y-%m-%d')" "$reason" "$new" >>"$file"
     log "Added to ${file}: ${new}"
 }
 
@@ -4319,23 +4775,23 @@ handle_plan_failure() {
     lic=$(extract_changes "license")
     kw=$(extract_changes "keyword")
     mask=$(extract_changes "mask")
-    if [[ -n $use || -n $lic || -n $kw ]]; then
+    if [ -n "$use" ] || [ -n "$lic" ] || [ -n "$kw" ]; then
         text="To go ahead, Portage needs some settings changed first:"$'\n'
-        if [[ -n $use ]]; then
+        if [ -n "$use" ]; then
             text+=$'\n'"Package options (USE flags) to turn on or off:"$'\n'"${use}"$'\n'"These switch on features that a package needs. Accepting them is normally safe."$'\n'
         fi
-        if [[ -n $lic ]]; then
+        if [ -n "$lic" ]; then
             text+=$'\n'"Licences to accept:"$'\n'"${lic}"$'\n'"These packages are not free software (or use an unusual licence), so their licence must be accepted explicitly."$'\n'
         fi
-        if [[ -n $kw ]]; then
+        if [ -n "$kw" ]; then
             def="n"
             text+=$'\n'"Testing versions to allow:"$'\n'"${kw}"$'\n'"The version needed is still marked as 'testing' (~amd64) on Gentoo. Testing versions usually work but have had less testing than stable ones. Only accept if you really want this."$'\n'
         fi
         text+=$'\n'"Save these settings and try again? They are saved in files named zz-gentoo-helper under /etc/portage, and can be reviewed or removed any time under 'Maintenance > Settings added by this helper'."
         if ui_yesno "$text" "$def"; then
-            if [[ -n $use ]]; then add_settings "$USE_FILE" "$use" "$reason"; fi
-            if [[ -n $lic ]]; then add_settings "$LICENSE_FILE" "$lic" "$reason"; fi
-            if [[ -n $kw ]]; then add_settings "$KEYWORDS_FILE" "$kw" "$reason"; fi
+            if [ -n "$use" ]; then add_settings "$USE_FILE" "$use" "$reason"; fi
+            if [ -n "$lic" ]; then add_settings "$LICENSE_FILE" "$lic" "$reason"; fi
+            if [ -n "$kw" ]; then add_settings "$KEYWORDS_FILE" "$kw" "$reason"; fi
             return 0
         fi
         return 1
@@ -4346,17 +4802,17 @@ handle_plan_failure() {
     fi
     f=$(tmpfile)
     {
-        if [[ -n $mask ]] || grep -q "have been masked" <<<"$PLAN_OUT"; then
-            echo "The package (or something it needs) is MASKED: Gentoo has blocked it,"
-            echo "usually because it is broken, insecure, or about to be removed. The"
-            echo "reason is shown below. This helper does not unmask packages."
+        if [ -n "$mask" ] || grep -q "have been masked" <<<"$PLAN_OUT"; then
+            printf '%s\n' "The package (or something it needs) is MASKED: Gentoo has blocked it,"
+            printf '%s\n' "usually because it is broken, insecure, or about to be removed. The"
+            printf '%s\n' "reason is shown below. This helper does not unmask packages."
         else
-            echo "Portage cannot work out how to do this. Its own explanation is below."
-            echo "Conflicts like this often go away after the next system update; if not,"
-            echo "search forums.gentoo.org for the package names mentioned."
+            printf '%s\n' "Portage cannot work out how to do this. Its own explanation is below."
+            printf '%s\n' "Conflicts like this often go away after the next system update; if not,"
+            printf '%s\n' "search forums.gentoo.org for the package names mentioned."
         fi
-        echo
-        echo "----------------------------------------------------------------------"
+        printf '\n'
+        printf '%s\n' "----------------------------------------------------------------------"
         printf '%s\n' "$PLAN_OUT"
     } >"$f"
     TITLE="Portage could not make a plan"
@@ -4375,8 +4831,8 @@ plan_and_run() {
         if (( PLAN_RC == 0 )); then break; fi
         if (( round == 4 )) || ! handle_plan_failure "$what"; then return 1; fi
     done
-    confirm_plan "$what"
-    rc=$?
+    rc=0
+    confirm_plan "$what" || rc=$?
     if (( rc == 3 )); then return 3; fi
     if (( rc != 0 )); then return 1; fi
     if run_emerge "$@"; then return 0; fi
@@ -4388,8 +4844,8 @@ plan_and_run() {
 install_packages() {
     local what=$1 rc
     shift
-    plan_and_run "$what" --noreplace "$@"
-    rc=$?
+    rc=0
+    plan_and_run "$what" --noreplace "$@" || rc=$?
     if (( rc == 0 || rc == 3 )); then return 0; fi
     return 1
 }
@@ -4397,38 +4853,49 @@ install_packages() {
 # ----------------------------------------------------------------------------
 # Status
 # ----------------------------------------------------------------------------
+# Days since the package repository was synced (-1 if unknown).
+# metadata/timestamp.x starts with the snapshot time in seconds; otherwise the
+# file times are used.
 sync_age_days() {
-    local f="${REPO_DIR}/metadata/timestamp.chk" ts=""
-    if [[ -r $f ]]; then ts=$(date -d "$(head -n1 "$f")" +%s 2>/dev/null || stat -c %Y "$f" 2>/dev/null || true); fi
-    if [[ -z $ts ]]; then ts=$(stat -c %Y "$REPO_DIR" 2>/dev/null || true); fi
-    if [[ ! $ts =~ ^[0-9]+$ ]]; then echo "-1"; return 0; fi
-    echo $(( ($(date +%s) - ts) / 86400 ))
+    local ts=""
+    if [ -r "${REPO_DIR}/metadata/timestamp.x" ]; then
+        ts=$(awk 'NR == 1 {print $1}' "${REPO_DIR}/metadata/timestamp.x" 2>/dev/null || true)
+    fi
+    if [[ ! $ts =~ ^[0-9]+$ ]]; then ts=$(file_mtime "${REPO_DIR}/metadata/timestamp.chk" || true); fi
+    if [[ ! $ts =~ ^[0-9]+$ ]]; then ts=$(file_mtime "$REPO_DIR" || true); fi
+    if [[ ! $ts =~ ^[0-9]+$ ]]; then printf '%s\n' "-1"; return 0; fi
+    printf '%s\n' "$(( ($(date +%s) - ts) / 86400 ))"
 }
 
 news_count() {
     local n
-    n=$(eselect news count new 2>/dev/null || echo 0)
+    n=$(eselect news count new 2>/dev/null || printf '%s\n' 0)
     [[ $n =~ ^[0-9]+$ ]] || n=0
-    echo "$n"
+    printf '%s\n' "$n"
 }
 
 pending_configs() {
     local p
     local -a paths=()
-    read -ra paths <<<"$(portageq envvar CONFIG_PROTECT 2>/dev/null || echo /etc)"
+    read -ra paths <<<"$(portageq envvar CONFIG_PROTECT 2>/dev/null || printf '%s\n' /etc)"
     for p in "${paths[@]}"; do
-        if [[ -e $p ]]; then find "$p" -name '._cfg[0-9][0-9][0-9][0-9]_*' 2>/dev/null; fi
-    done | sort
+        if [ -e "$p" ]; then find "$p" -name '._cfg[0-9][0-9][0-9][0-9]_*' 2>/dev/null || true; fi
+    done | LC_ALL=C sort
 }
 
+# The newest kernel in /lib/modules, if it is not the running one.
 newer_kernel() {
-    local newest
-    newest=$(find /lib/modules -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort -V | tail -n1)
-    if [[ -n $newest && $newest != "$(uname -r)" ]]; then echo "$newest"; fi
+    local newest d
+    newest=$(for d in /lib/modules/*/; do
+            [ -d "$d" ] || continue
+            d=${d%/}
+            printf '%s\n' "${d##*/}"
+        done | LC_ALL=C sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
+    if [ -n "$newest" ] && [ "$newest" != "$(uname -r)" ]; then printf '%s\n' "$newest"; fi
 }
 
 binpkgs_enabled() {
-    [[ " $(portageq envvar FEATURES 2>/dev/null) " == *" getbinpkg "* ]]
+    [[ " $(portageq envvar FEATURES 2>/dev/null) " = *" getbinpkg "* ]]
 }
 
 status_text() {
@@ -4447,7 +4914,7 @@ status_text() {
     if binpkgs_enabled; then s+="    Ready-made packages: on"; else s+="    Ready-made packages: off"; fi
     if (( news > 0 )); then s+=$'\n'"Unread Gentoo news: ${news} (Maintenance > Read Gentoo news)"; fi
     if (( cfg > 0 )); then s+=$'\n'"Configuration updates waiting: ${cfg} (Maintenance)"; fi
-    if [[ -n $kern ]]; then s+=$'\n'"A newer kernel (${kern}) is installed: restart the computer to use it."; fi
+    if [ -n "$kern" ]; then s+=$'\n'"A newer kernel (${kern}) is installed: restart the computer to use it."; fi
     printf '%s' "$s"
 }
 
@@ -4459,17 +4926,17 @@ status_text() {
 search_packages() {
     local term=$1 mode=${2:-name} name inst latest desc
     local -a opts=(--search)
-    if [[ $mode == "desc" ]]; then opts=(--searchdesc); fi
+    if [ "$mode" = "desc" ]; then opts=(--searchdesc); fi
     busy "Searching for '${term}'. This takes a few seconds..."
-    OUT=$(emerge "${opts[@]}" --color=n --nospinner "$term" 2>&1)
+    OUT=$(emerge "${opts[@]}" --color=n --nospinner "$term" 2>&1 || true)
     SR_NAME=(); SR_INST=(); SR_LATEST=(); SR_DESC=()
     # Fields are separated by the ASCII unit separator: with a tab, read would
     # merge consecutive separators and shift fields when one is empty.
     local sep=$'\x1f'
     local -a exact=() other=()
     while IFS=$sep read -r name inst latest desc; do
-        [[ -n $name ]] || continue
-        if [[ ${name##*/} == "${term,,}" || ${name##*/} == "${term,,}-bin" ]]; then
+        [ -n "$name" ] || continue
+        if [ "${name##*/}" = "${term,,}" ] || [ "${name##*/}" = "${term,,}-bin" ]; then
             exact+=("${name}${sep}${inst}${sep}${latest}${sep}${desc}")
         else
             other+=("${name}${sep}${inst}${sep}${latest}${sep}${desc}")
@@ -4492,7 +4959,7 @@ install_flow() {
     local term=${1:-} i label count max=150
     local -a items=()
     TITLE="Find and install"
-    if [[ -z $term ]]; then
+    if [ -z "$term" ]; then
         ui_input "What are you looking for? Type a program name or part of it, for example: firefox, vlc, gimp, htop." "" || return 0
         term=$CHOICE
     fi
@@ -4513,8 +4980,8 @@ install_flow() {
     count=${#SR_NAME[@]}
     for (( i = 0; i < count && i < max; i++ )); do
         label="${SR_NAME[i]}"
-        if [[ -n ${SR_INST[i]} ]]; then label+="  [installed]"; fi
-        if [[ -n ${SR_DESC[i]} ]]; then label+="  ${SR_DESC[i]}"; fi
+        if [ -n "${SR_INST[i]}" ]; then label+="  [installed]"; fi
+        if [ -n "${SR_DESC[i]}" ]; then label+="  ${SR_DESC[i]}"; fi
         items+=("$i" "${label:0:110}")
     done
     local text="Found ${count} package(s) for '${term}'."
@@ -4532,11 +4999,11 @@ package_actions() {
     name=${SR_NAME[i]}; inst=${SR_INST[i]}; latest=${SR_LATEST[i]}; desc=${SR_DESC[i]}
     TITLE=$name
     text="${name}"$'\n'"${desc}"$'\n\n'"Newest version available: ${latest:-unknown}"$'\n'
-    if [[ -n $inst ]]; then
+    if [ -n "$inst" ]; then
         text+="Installed version: ${inst}"$'\n\n'"It is already installed. Newer versions arrive with the regular system update."
         if ! ui_menu "$text" "back" reinstall "Reinstall it" remove "Remove it" back "Back"; then return 0; fi
         case "$CHOICE" in
-            reinstall) plan_and_run "Reinstall ${name}" --oneshot "$name" ;;
+            reinstall) plan_and_run "Reinstall ${name}" --oneshot "$name" || true ;;
             remove) remove_package "$name" ;;
         esac
         return 0
@@ -4551,9 +5018,9 @@ package_actions() {
     fi
     local rc=0
     case "$CHOICE" in
-        normal) plan_and_run "Install ${name}" "$name"; rc=$? ;;
-        binary) plan_and_run "Install ${name} (ready-made packages only)" --getbinpkgonly "$name"; rc=$? ;;
-        source) plan_and_run "Install ${name} (compiled on this computer)" --usepkg=n --getbinpkg=n "$name"; rc=$? ;;
+        normal) plan_and_run "Install ${name}" "$name" || rc=$? ;;
+        binary) plan_and_run "Install ${name} (ready-made packages only)" --getbinpkgonly "$name" || rc=$? ;;
+        source) plan_and_run "Install ${name} (compiled on this computer)" --usepkg=n --getbinpkg=n "$name" || rc=$? ;;
         *) return 0 ;;
     esac
     if (( rc == 3 )); then ui_msg "Nothing to do: ${name} and everything it needs are already installed."; fi
@@ -4570,7 +5037,7 @@ is_critical() {
     case "$1" in
         sys-kernel/*|sys-boot/*|sys-firmware/*|sys-apps/*|app-admin/sudo|app-admin/doas|\
         net-misc/networkmanager|net-misc/dhcpcd|kde-plasma/plasma-meta|gnome-base/gnome|gnome-base/gnome-light|\
-        x11-misc/sddm|gnome-base/gdm|x11-misc/lightdm*|gui-libs/display-manager-init|sys-fs/*|\
+        gui-apps/sddm|gnome-base/gdm|x11-misc/lightdm*|gui-libs/display-manager-init|sys-fs/*|\
         x11-drivers/*|app-admin/sysklogd|sys-process/cronie|net-misc/chrony|app-portage/gentoolkit)
             return 0 ;;
     esac
@@ -4578,7 +5045,7 @@ is_critical() {
 }
 
 world_entries() {
-    grep -vE '^[[:space:]]*(#|$)' "$WORLD_FILE" 2>/dev/null | sort -u
+    grep -vE '^[[:space:]]*(#|$)' "$WORLD_FILE" 2>/dev/null | LC_ALL=C sort -u || true
 }
 
 remove_flow() {
@@ -4586,13 +5053,13 @@ remove_flow() {
     local -a matches=() items=()
     TITLE="Remove a package"
     while IFS= read -r e; do
-        if [[ -z $term || $e == *"$term"* ]]; then matches+=("$e"); fi
+        if [[ -z $term || $e = *"$term"* ]]; then matches+=("$e"); fi
     done < <(world_entries)
     if (( ${#matches[@]} == 0 )); then
         ui_msg "None of the packages you installed matches '${term}'. (Only packages you installed yourself can be removed here; the rest are dependencies that Portage manages.)"
         return 0
     fi
-    if (( ${#matches[@]} == 1 )) && [[ -n $term ]]; then
+    if (( ${#matches[@]} == 1 )) && [ -n "$term" ]; then
         remove_package "${matches[0]}"
         return 0
     fi
@@ -4614,24 +5081,24 @@ remove_package() {
         fi
     fi
     busy "Checking what removing ${pkg} would do..."
-    emerge --deselect "$pkg" >>"$LOG" 2>&1
-    OUT=$(emerge --pretend --depclean --color=n --nospinner "$pkg" 2>&1)
+    emerge --deselect "$pkg" >>"$LOG" 2>&1 || true
+    OUT=$(emerge --pretend --depclean --color=n --nospinner "$pkg" 2>&1 || true)
     sel=$(sed -n 's/^All selected packages: //p' <<<"$OUT")
     count=$(awk '/^Number to remove:/ {print $NF}' <<<"$OUT")
-    if [[ -z $sel || ${count:-0} == "0" ]]; then
-        emerge --noreplace --nodeps "$pkg" >>"$LOG" 2>&1
+    if [ -z "$sel" ] || [ "${count:-0}" = "0" ]; then
+        emerge --noreplace --nodeps "$pkg" >>"$LOG" 2>&1 || true
         f=$(tmpfile)
         {
-            echo "${pkg} was not removed, because other installed packages need it."
-            echo "Portage's explanation:"
-            echo
+            printf '%s\n' "${pkg} was not removed, because other installed packages need it."
+            printf '%s\n' "Portage's explanation:"
+            printf '\n'
             printf '%s\n' "$OUT"
         } >"$f"
         ui_file "$f"
         return 0
     fi
     if ! ui_yesno "This will remove:"$'\n'"$(tr ' ' '\n' <<<"$sel" | sed 's/^=/  /')"$'\n\n'"Go ahead?" y; then
-        emerge --noreplace --nodeps "$pkg" >>"$LOG" 2>&1
+        emerge --noreplace --nodeps "$pkg" >>"$LOG" 2>&1 || true
         return 0
     fi
     if run_visible emerge --color=y --depclean "$pkg"; then
@@ -4664,8 +5131,8 @@ update_flow() {
     news_flow quiet
     perl_before=$(perl_version)
     TITLE="Update the system"
-    plan_and_run "System update" --update --deep --newuse --keep-going=y @world
-    rc=$?
+    rc=0
+    plan_and_run "System update" --update --deep --newuse --keep-going=y @world || rc=$?
     if (( rc == 3 )); then ui_msg "Everything is already up to date."; fi
     after_update "$perl_before"
 }
@@ -4673,13 +5140,13 @@ update_flow() {
 after_update() {
     local perl_before=$1 kern
     TITLE="After the update"
-    if [[ -n $perl_before && $(perl_version) != "$perl_before" ]] && have perl-cleaner; then
+    if [ -n "$perl_before" ] && [ "$(perl_version)" != "$perl_before" ] && have perl-cleaner; then
         ui_msg "Perl was upgraded (${perl_before} to $(perl_version)). Perl modules built for the old version are now rebuilt, otherwise some programs and later builds fail."
         perl_rebuild
     fi
     if portageq list_preserved_libs / >/dev/null 2>&1; then
         ui_msg "Some programs still use old versions of updated libraries. They are rebuilt now so the old libraries can be removed."
-        run_emerge @preserved-rebuild
+        run_emerge @preserved-rebuild || true
     fi
     depclean_flow quiet
     if (( $(pending_configs | wc -l) > 0 )); then
@@ -4687,15 +5154,15 @@ after_update() {
             config_flow
         fi
     fi
-    if have flatpak && [[ -n $(flatpak list --app --columns=application 2>/dev/null) ]]; then
+    if have flatpak && [ -n "$(flatpak list --app --columns=application 2>/dev/null)" ]; then
         if ui_yesno "Update your Flatpak apps too?" y; then
-            run_visible flatpak update -y
+            run_visible flatpak update -y || true
             pause_text
         fi
     fi
     kern=$(newer_kernel)
     TITLE="Update finished"
-    if [[ -n $kern ]]; then
+    if [ -n "$kern" ]; then
         ui_msg "Update finished. A new kernel (${kern}) was installed: restart the computer to start using it. The previous kernel stays in the boot menu as a fallback."
     else
         ui_msg "Update finished."
@@ -4711,15 +5178,15 @@ depclean_flow() {
     local quiet=${1:-} sel count
     TITLE="Remove unneeded packages"
     busy "Looking for packages that nothing needs anymore..."
-    OUT=$(emerge --pretend --depclean --color=n --nospinner 2>&1)
+    OUT=$(emerge --pretend --depclean --color=n --nospinner 2>&1 || true)
     sel=$(sed -n 's/^All selected packages: //p' <<<"$OUT")
     count=$(awk '/^Number to remove:/ {print $NF}' <<<"$OUT")
-    if [[ -z $sel || ${count:-0} == "0" ]]; then
-        if [[ -z $quiet ]]; then ui_msg "Nothing to clean up: every installed package is still needed."; fi
+    if [ -z "$sel" ] || [ "${count:-0}" = "0" ]; then
+        if [ -z "$quiet" ]; then ui_msg "Nothing to clean up: every installed package is still needed."; fi
         return 0
     fi
     if ui_yesno "These ${count} package(s) are no longer needed by anything you installed (usually old versions or dependencies of removed programs):"$'\n\n'"$(tr ' ' '\n' <<<"$sel" | sed 's/^=/  /')"$'\n\n'"Remove them?" y; then
-        run_visible emerge --color=y --depclean
+        run_visible emerge --color=y --depclean || true
         pause_text
     fi
 }
@@ -4739,13 +5206,13 @@ space_flow() {
         return 0
     fi
     clear_screen
-    run_visible eclean-dist --deep
-    if have eclean-pkg; then eclean-pkg --deep 2>&1 | tee -a "$LOG"; fi
+    run_visible eclean-dist --deep || true
+    if have eclean-pkg; then eclean-pkg --deep 2>&1 | tee -a "$LOG" || true; fi
     pause_text
-    leftovers=$(du -sh /var/tmp/portage 2>/dev/null | awk '{print $1}')
-    if [[ -n $(find /var/tmp/portage -mindepth 1 -maxdepth 1 2>/dev/null | head -n1) ]]; then
+    leftovers=$(du -sh /var/tmp/portage 2>/dev/null | awk '{print $1}' || true)
+    if [ -n "$(find /var/tmp/portage -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 || true)" ]; then
         if ui_yesno "Leftovers from failed or interrupted builds use ${leftovers:-some space} in /var/tmp/portage. Delete them? (Do not do this while another emerge is running.)" y; then
-            find /var/tmp/portage -mindepth 1 -delete 2>/dev/null
+            clear_dir /var/tmp/portage
         fi
     fi
     after=$(df -h / | awk 'NR == 2 {print $4}')
@@ -4763,17 +5230,17 @@ kernels_flow() {
         fi
     fi
     busy "Checking installed kernels..."
-    OUT=$(eclean-kernel -p -n 3 2>&1)
+    OUT=$(eclean-kernel -p -n 3 2>&1 || true)
     f=$(tmpfile)
     {
-        echo "Old kernels are kept after updates as a fallback. This keeps the 3 newest"
-        echo "and removes older ones. What eclean-kernel would do:"
-        echo
+        printf '%s\n' "Old kernels are kept after updates as a fallback. This keeps the 3 newest"
+        printf '%s\n' "and removes older ones. What eclean-kernel would do:"
+        printf '\n'
         printf '%s\n' "$OUT"
     } >"$f"
     ui_file "$f"
     if ui_yesno "Remove the older kernels listed above (keeping the 3 newest and the running one)?" n; then
-        run_visible eclean-kernel -n 3
+        run_visible eclean-kernel -n 3 || true
         pause_text
     fi
 }
@@ -4781,14 +5248,14 @@ kernels_flow() {
 perl_rebuild() {
     local edo
     edo=$(portageq envvar EMERGE_DEFAULT_OPTS 2>/dev/null || true)
-    run_visible env EMERGE_DEFAULT_OPTS="${edo} --quiet-build=y --color=y" perl-cleaner --all
+    run_visible env EMERGE_DEFAULT_OPTS="${edo} --quiet-build=y --color=y" perl-cleaner --all || true
     pause_text
 }
 
 preserved_flow() {
     TITLE="Rebuild after library updates"
     if portageq list_preserved_libs / >/dev/null 2>&1; then
-        run_emerge @preserved-rebuild
+        run_emerge @preserved-rebuild || true
     else
         ui_msg "Nothing to do: no program is using an outdated library."
     fi
@@ -4800,14 +5267,14 @@ news_flow() {
     TITLE="Gentoo news"
     n=$(news_count)
     if (( n == 0 )); then
-        if [[ -z $quiet ]]; then ui_msg "No unread news."; fi
+        if [ -z "$quiet" ]; then ui_msg "No unread news."; fi
         return 0
     fi
-    if [[ -n $quiet ]] && ! ui_yesno "There are ${n} unread Gentoo news item(s). They announce changes that sometimes need a manual step, so it is worth reading them before updating. Read them now?" y; then
+    if [ -n "$quiet" ] && ! ui_yesno "There are ${n} unread Gentoo news item(s). They announce changes that sometimes need a manual step, so it is worth reading them before updating. Read them now?" y; then
         return 0
     fi
     f=$(tmpfile)
-    eselect news read new 2>&1 | sed 's/\x1b\[[0-9;]*m//g' >"$f"
+    eselect news read new 2>&1 | strip_colors >"$f" || true
     ui_file "$f"
 }
 
@@ -4815,9 +5282,9 @@ news_flow() {
 config_note() {
     case "$1" in
         /etc/default/grub|/etc/conf.d/hostname|/etc/conf.d/keymaps|/etc/conf.d/display-manager|/etc/locale.gen|/etc/hosts|/etc/fstab|/etc/sudoers|/etc/doas.conf|/etc/portage/*)
-            echo "This file was customised during installation or by you. Keeping your version is usually right; the update's changes are often just comments." ;;
+            printf '%s\n' "This file was customised during installation or by you. Keeping your version is usually right; the update's changes are often just comments." ;;
         *)
-            echo "If you never changed this file yourself, using the new version is usually right." ;;
+            printf '%s\n' "If you never changed this file yourself, using the new version is usually right." ;;
     esac
 }
 
@@ -4843,17 +5310,17 @@ config_flow() {
     for target in "${targets[@]}"; do
         local newest=""
         for cfg in "${cfgs[@]}"; do
-            if [[ $(cfg_target "$cfg") == "$target" ]]; then newest=$cfg; fi
+            if [ "$(cfg_target "$cfg")" = "$target" ]; then newest=$cfg; fi
         done
-        [[ -n $newest ]] || continue
+        [ -n "$newest" ] || continue
         diffout=$(diff -u "$target" "$newest" 2>&1 || true)
         f=$(tmpfile)
         {
-            echo "File: ${target}"
-            echo
-            echo "An update brought a new version of this file. Lines starting with - are"
-            echo "only in your current file, lines starting with + only in the new one."
-            echo
+            printf '%s\n' "File: ${target}"
+            printf '\n'
+            printf '%s\n' "An update brought a new version of this file. Lines starting with - are"
+            printf '%s\n' "only in your current file, lines starting with + only in the new one."
+            printf '\n'
             printf '%s\n' "$diffout"
         } >"$f"
         TITLE="Update for ${target}"
@@ -4867,14 +5334,17 @@ config_flow() {
         fi
         case "$CHOICE" in
             keep)
-                rm -f "${target%/*}"/._cfg[0-9][0-9][0-9][0-9]_"${target##*/}"
+                rm -f -- "${target%/*}"/._cfg[0-9][0-9][0-9][0-9]_"${target##*/}"
                 log "Config: kept ${target}" ;;
             new)
                 local bak
                 bak="${target}.bak-$(date +%Y%m%d-%H%M%S)"
-                cp -p "$target" "$bak" 2>/dev/null || true
-                mv -f "$newest" "$target"
-                rm -f "${target%/*}"/._cfg[0-9][0-9][0-9][0-9]_"${target##*/}"
+                cp -p -- "$target" "$bak" 2>/dev/null || true
+                if ! mv -f -- "$newest" "$target"; then
+                    ui_msg "Could not replace ${target}; it was left as it is."
+                    continue
+                fi
+                rm -f -- "${target%/*}"/._cfg[0-9][0-9][0-9][0-9]_"${target##*/}"
                 log "Config: replaced ${target} (backup ${bak})"
                 ui_msg "Replaced. Your previous file is saved as ${bak}." ;;
             stop) return 0 ;;
@@ -4890,17 +5360,17 @@ settings_flow() {
     while true; do
         f=$(tmpfile)
         {
-            echo "Settings this helper saved when Portage asked for them. They live in"
-            echo "their own files, so your other settings are never touched."
+            printf '%s\n' "Settings this helper saved when Portage asked for them. They live in"
+            printf '%s\n' "their own files, so your other settings are never touched."
             for file in "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"; do
-                echo
-                echo "== ${file}"
-                if [[ -s $file ]]; then cat "$file"; else echo "(none)"; fi
+                printf '\n'
+                printf '%s\n' "== ${file}"
+                if [ -s "$file" ]; then cat "$file"; else printf '%s\n' "(none)"; fi
             done
         } >"$f"
         if ! ui_menu "Package options (USE flags), accepted licences, allowed testing versions and blocked versions saved by this helper." "view" \
             view "Show them" \
-            edit "Edit them (nano text editor)" \
+            edit "Edit them (in \$EDITOR, or nano)" \
             clear "Remove all of them" \
             back "Back"; then
             return 0
@@ -4910,15 +5380,15 @@ settings_flow() {
             edit)
                 local -a existing=()
                 for file in "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"; do
-                    if [[ -f $file ]]; then existing+=("$file"); fi
+                    if [ -f "$file" ]; then existing+=("$file"); fi
                 done
                 if (( ${#existing[@]} == 0 )); then ui_msg "There are none yet."; continue; fi
                 clear_screen
-                nano "${existing[@]}"
+                "${EDITOR:-nano}" "${existing[@]}" || true
                 ;;
             clear)
                 if ui_yesno "Remove all settings saved by this helper? Packages that needed them may fail to update until the settings are added again (the helper offers that automatically)." n; then
-                    rm -f "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"
+                    rm -f -- "$USE_FILE" "$LICENSE_FILE" "$KEYWORDS_FILE" "$MASK_FILE"
                     log "Removed all helper settings"
                     ui_msg "Removed. The next system update rebuilds whatever is affected."
                 fi
@@ -4932,9 +5402,9 @@ world_flow() {
     local f
     f=$(tmpfile)
     {
-        echo "Packages you (or the installer) chose to install. Their dependencies are"
-        echo "not listed; Portage installs, updates and removes those automatically."
-        echo
+        printf '%s\n' "Packages you (or the installer) chose to install. Their dependencies are"
+        printf '%s\n' "not listed; Portage installs, updates and removes those automatically."
+        printf '\n'
         world_entries
     } >"$f"
     TITLE="Packages I installed"
@@ -4958,7 +5428,7 @@ maint_menu() {
             world "Show the packages I installed"
             settings "Settings added by this helper"
         )
-        if [[ -s $LAST_FAILURE ]]; then items+=(failure "Show the last failure report"); fi
+        if [ -s "$LAST_FAILURE" ]; then items+=(failure "Show the last failure report"); fi
         if ! ui_menu "Things to do now and then to keep the system tidy. Each one explains itself and asks before changing anything." "$def" "${items[@]}"; then
             return 0
         fi
@@ -4998,11 +5468,10 @@ flathub_ready() {
     remotes=$(flatpak remotes --columns=name 2>/dev/null || true)
     if grep -qx "flathub" <<<"$remotes"; then return 0; fi
     if ui_yesno "Flathub (the main Flatpak app store) is not set up yet. Add it now?" y; then
-        run_visible flatpak remote-add --if-not-exists flathub "$FLATHUB_URL"
+        run_visible flatpak remote-add --if-not-exists flathub "$FLATHUB_URL" || true
         pause_text
         remotes=$(flatpak remotes --columns=name 2>/dev/null || true)
-        grep -qx "flathub" <<<"$remotes"
-        return $?
+        if grep -qx "flathub" <<<"$remotes"; then return 0; fi
     fi
     return 1
 }
@@ -5012,21 +5481,21 @@ flatpak_install() {
     local -a items=() ids=()
     TITLE="Install a Flatpak app"
     flathub_ready || return 0
-    if [[ -z $term ]]; then
+    if [ -z "$term" ]; then
         ui_input "Which app are you looking for? (for example: spotify, discord, steam, obs)" "" || return 0
         term=$CHOICE
     fi
     busy "Searching Flathub for '${term}'..."
-    OUT=$(flatpak search --columns=application,name,description "$term" 2>&1)
+    OUT=$(flatpak search --columns=application,name,description "$term" 2>&1 || true)
     while IFS= read -r line; do
-        [[ -n $line ]] || continue
-        if [[ $line == *$'\t'* ]]; then
+        [ -n "$line" ] || continue
+        if [[ $line = *$'\t'* ]]; then
             # A non-whitespace separator keeps empty columns in place.
             IFS=$'\x1f' read -r id name desc <<<"${line//$'\t'/$'\x1f'}"
         else
             read -r id name desc <<<"$line"
         fi
-        [[ $id == *.*.* ]] || continue
+        [[ $id = *.*.* ]] || continue
         ids+=("$id")
         items+=("$id" "${name}: ${desc}")
     done <<<"$OUT"
@@ -5053,13 +5522,13 @@ flatpak_remove() {
     local -a items=()
     TITLE="Remove a Flatpak app"
     while IFS=$'\x1f' read -r id name; do
-        [[ -n $id ]] || continue
+        [ -n "$id" ] || continue
         items+=("$id" "${name:-$id}  (${id})")
     done < <(flatpak list --app --columns=application,name 2>/dev/null | tr '\t' '\037')
     if (( ${#items[@]} == 0 )); then ui_msg "No Flatpak apps are installed."; return 0; fi
     if ! ui_menu "Which Flatpak app should be removed?" "" "${items[@]}"; then return 0; fi
     if ui_yesno "Remove ${CHOICE}?" y; then
-        run_visible flatpak uninstall -y --noninteractive "$CHOICE"
+        run_visible flatpak uninstall -y --noninteractive "$CHOICE" || true
         pause_text
     fi
 }
@@ -5088,12 +5557,12 @@ flatpak_menu() {
         case "$CHOICE" in
             install) flatpak_install ;;
             remove) flatpak_remove ;;
-            update) run_visible flatpak update -y; pause_text ;;
-            unused) run_visible flatpak uninstall --unused -y; pause_text ;;
+            update) run_visible flatpak update -y || true; pause_text ;;
+            unused) run_visible flatpak uninstall --unused -y || true; pause_text ;;
             list)
                 local f
                 f=$(tmpfile)
-                flatpak list --app --columns=name,application,version >"$f" 2>&1
+                flatpak list --app --columns=name,application,version >"$f" 2>&1 || true
                 TITLE="Installed Flatpak apps"
                 ui_file "$f" ;;
         esac
@@ -5106,7 +5575,7 @@ flatpak_menu() {
 GROUPS_ADDED=""
 
 init_system() {
-    if [[ -d /run/systemd/system ]]; then echo "systemd"; else echo "openrc"; fi
+    if [ -d /run/systemd/system ]; then printf '%s\n' "systemd"; else printf '%s\n' "openrc"; fi
 }
 
 # pkg_installed CATEGORY/NAME
@@ -5118,8 +5587,8 @@ pkg_installed() {
 pkg_has_use() {
     local d
     for d in /var/db/pkg/"${1}"-[0-9]*; do
-        [[ -r $d/USE ]] || continue
-        if [[ " $(<"$d/USE") " == *" $2 "* ]]; then return 0; fi
+        [ -r "$d/USE" ] || continue
+        if [[ " $(<"$d/USE") " = *" $2 "* ]]; then return 0; fi
     done
     return 1
 }
@@ -5130,12 +5599,12 @@ svc_unit() {
     local n init
     init=$(init_system)
     for n in "$@"; do
-        if [[ $init == "systemd" ]]; then
+        if [ "$init" = "systemd" ]; then
             if [[ $n != *.* ]]; then n="${n}.service"; fi
-            if [[ -n $(systemctl list-unit-files --no-legend "$n" 2>/dev/null) ]]; then echo "$n"; return 0; fi
+            if [ -n "$(systemctl list-unit-files --no-legend "$n" 2>/dev/null || true)" ]; then printf '%s\n' "$n"; return 0; fi
         else
-            if [[ $n == *.* ]]; then continue; fi
-            if [[ -x /etc/init.d/$n ]]; then echo "$n"; return 0; fi
+            if [[ $n = *.* ]]; then continue; fi
+            if [ -x "/etc/init.d/$n" ]; then printf '%s\n' "$n"; return 0; fi
         fi
     done
     return 1
@@ -5144,7 +5613,7 @@ svc_unit() {
 svc_active() {
     local u
     u=$(svc_unit "$@") || return 1
-    if [[ $(init_system) == "systemd" ]]; then
+    if [ "$(init_system)" = "systemd" ]; then
         systemctl is-active --quiet "$u"
     else
         rc-service "$u" status >/dev/null 2>&1
@@ -5154,7 +5623,7 @@ svc_active() {
 svc_enabled() {
     local u shown
     u=$(svc_unit "$@") || return 1
-    if [[ $(init_system) == "systemd" ]]; then
+    if [ "$(init_system)" = "systemd" ]; then
         systemctl is-enabled --quiet "$u"
     else
         shown=$(rc-update show default 2>/dev/null; rc-update show boot 2>/dev/null)
@@ -5166,10 +5635,10 @@ svc_enabled() {
 svc_enable_now() {
     local u rc=0
     u=$(svc_unit "$@") || { log "No service found among: $*"; return 1; }
-    if [[ $(init_system) == "systemd" ]]; then
+    if [ "$(init_system)" = "systemd" ]; then
         systemctl enable --now "$u" >>"$LOG" 2>&1 || rc=$?
     else
-        rc-update add "$u" default >>"$LOG" 2>&1
+        rc-update add "$u" default >>"$LOG" 2>&1 || true
         rc-service "$u" start >>"$LOG" 2>&1 || rc=$?
     fi
     log "Enable and start ${u}: exit ${rc}"
@@ -5180,11 +5649,11 @@ svc_enable_now() {
 svc_disable_now() {
     local u
     u=$(svc_unit "$@") || return 0
-    if [[ $(init_system) == "systemd" ]]; then
-        systemctl disable --now "$u" >>"$LOG" 2>&1
+    if [ "$(init_system)" = "systemd" ]; then
+        systemctl disable --now "$u" >>"$LOG" 2>&1 || true
     else
-        rc-service "$u" stop >>"$LOG" 2>&1
-        rc-update del "$u" default >>"$LOG" 2>&1
+        rc-service "$u" stop >>"$LOG" 2>&1 || true
+        rc-update del "$u" default >>"$LOG" 2>&1 || true
     fi
     log "Disable and stop ${u}"
     return 0
@@ -5193,7 +5662,7 @@ svc_disable_now() {
 # The everyday (non-root) user this helper is working for.
 target_user() {
     local u=${SUDO_USER:-${DOAS_USER:-}}
-    if [[ -n $u && $u != "root" ]]; then echo "$u"; return 0; fi
+    if [ -n "$u" ] && [ "$u" != "root" ]; then printf '%s\n' "$u"; return 0; fi
     getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}'
 }
 
@@ -5203,7 +5672,7 @@ add_user_groups() {
     local user g current added=""
     user=$(target_user)
     GROUPS_ADDED=""
-    if [[ -z $user ]]; then return 0; fi
+    if [ -z "$user" ]; then return 0; fi
     current=" $(id -nG "$user" 2>/dev/null) "
     for g in "$@"; do
         if getent group "$g" >/dev/null && [[ $current != *" $g "* ]]; then
@@ -5211,11 +5680,11 @@ add_user_groups() {
         fi
     done
     GROUPS_ADDED=$added
-    if [[ -n $added ]]; then log "Added ${user} to groups: ${added}"; fi
+    if [ -n "$added" ]; then log "Added ${user} to groups: ${added}"; fi
 }
 
 groups_note() {
-    if [[ -n $GROUPS_ADDED ]]; then
+    if [ -n "$GROUPS_ADDED" ]; then
         printf '%s' $'\n\n'"Your user was added to the group(s): ${GROUPS_ADDED}. Log out and back in for that to take effect."
     fi
 }
@@ -5224,31 +5693,64 @@ groups_note() {
 pci_devices() {
     local d class vendor drv name slot
     for d in /sys/bus/pci/devices/*; do
-        [[ -r $d/class ]] || continue
+        [ -r "$d/class" ] || continue
         class=$(<"$d/class")
-        [[ $class == "$1"* ]] || continue
+        [[ $class = "$1"* ]] || continue
         vendor=$(<"$d/vendor")
         slot=${d##*/}
         drv="none"
-        if [[ -L $d/driver ]]; then drv=$(basename "$(readlink "$d/driver")"); fi
+        if [ -L "$d/driver" ]; then drv=$(basename "$(readlink "$d/driver")"); fi
         name=""
-        if have lspci; then name=$(lspci -s "$slot" 2>/dev/null | cut -d' ' -f2-); fi
+        if have lspci; then name=$(LC_ALL=C lspci -s "$slot" 2>/dev/null | cut -d' ' -f2- || true); fi
         printf '%s|%s|%s|%s\n' "$slot" "$vendor" "$drv" "${name:-PCI device ${slot}}"
     done
+}
+
+# broadcom_kind_here: "wl" or "b43" when this computer has a Broadcom Wi-Fi
+# chip that needs that driver (same table as broadcom_wifi_kind in the installer).
+broadcom_kind_here() {
+    local slot vendor drv name dev result=""
+    while IFS='|' read -r slot vendor drv name; do
+        [ "$vendor" = "0x14e4" ] || continue
+        dev=$(cat -- "/sys/bus/pci/devices/${slot}/device" 2>/dev/null || true)
+        case "$dev" in
+            0x43a0|0x43b1|0x4365|0x4359) result="wl" ;;
+            0x4311|0x4312|0x4315|0x4318|0x4319|0x4328|0x4329|0x432a|0x432b|0x432c|0x432d|0x4331)
+                [ -n "$result" ] || result="b43" ;;
+        esac
+    done < <(pci_devices "0x0280")
+    printf '%s' "$result"
+}
+
+is_apple() {
+    [[ $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true) = *Apple* ]]
+}
+
+is_laptop() {
+    if compgen -G "/sys/class/power_supply/BAT*" >/dev/null; then return 0; fi
+    case "$(cat /sys/class/dmi/id/chassis_type 2>/dev/null || printf '0')" in
+        8|9|10|11|14|30|31|32) return 0 ;;
+    esac
+    return 1
+}
+
+# Number of graphics chips (two means a hybrid laptop, for example Intel + NVIDIA).
+gpu_count() {
+    pci_devices "0x03" | grep -c . || true
 }
 
 wifi_ifaces() {
     local n out=""
     for n in /sys/class/net/*; do
-        if [[ -d $n/wireless || -e $n/phy80211 ]]; then out+="${out:+ }${n##*/}"; fi
+        if [ -d "$n/wireless" ] || [ -e "$n/phy80211" ]; then out+="${out:+ }${n##*/}"; fi
     done
     printf '%s' "$out"
 }
 
 desktop_kind() {
-    if pkg_installed kde-plasma/plasma-workspace; then echo "plasma"
-    elif pkg_installed gnome-base/gnome-shell; then echo "gnome"
-    else echo "other"; fi
+    if pkg_installed kde-plasma/plasma-workspace; then printf '%s\n' "plasma"
+    elif pkg_installed gnome-base/gnome-shell; then printf '%s\n' "gnome"
+    else printf '%s\n' "other"; fi
 }
 
 task_status() {
@@ -5256,21 +5758,21 @@ task_status() {
     case "$1" in
         printing)
             if pkg_installed net-print/cups; then
-                if svc_enabled cupsd cups.service; then echo "set up"; else echo "installed, not running"; fi
+                if svc_enabled cupsd cups.service; then printf '%s\n' "set up"; else printf '%s\n' "installed, not running"; fi
             fi ;;
-        scanning) if pkg_installed media-gfx/sane-backends; then echo "installed"; fi ;;
+        scanning) if pkg_installed media-gfx/sane-backends; then printf '%s\n' "installed"; fi ;;
         wifi)
             n=$(wifi_ifaces)
-            if [[ -n $n ]]; then echo "adapter: ${n}"; else echo "no adapter found"; fi ;;
+            if [ -n "$n" ]; then printf '%s\n' "adapter: ${n}"; else printf '%s\n' "no adapter found"; fi ;;
         bluetooth)
             if pkg_installed net-wireless/bluez; then
-                if svc_enabled bluetooth; then echo "set up"; else echo "installed, off"; fi
+                if svc_enabled bluetooth; then printf '%s\n' "set up"; else printf '%s\n' "installed, off"; fi
             fi ;;
-        codecs) if pkg_installed media-plugins/gst-plugins-libav; then echo "installed"; fi ;;
-        ssh) if svc_active sshd; then echo "server running"; fi ;;
+        codecs) if pkg_installed media-plugins/gst-plugins-libav; then printf '%s\n' "installed"; fi ;;
+        ssh) if svc_active sshd; then printf '%s\n' "server running"; fi ;;
         firewall)
-            if have ufw && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then echo "on"; fi ;;
-        vms) if pkg_installed app-emulation/virt-manager; then echo "installed"; fi ;;
+            if have ufw && [[ $(LC_ALL=C ufw status 2>/dev/null) = *"Status: active"* ]]; then printf '%s\n' "on"; fi ;;
+        vms) if pkg_installed app-emulation/virt-manager; then printf '%s\n' "installed"; fi ;;
     esac
 }
 
@@ -5290,7 +5792,7 @@ task_printing() {
     )
     local -a pkgs=()
     TITLE="Printing"
-    if [[ $(desktop_kind) == "plasma" ]]; then
+    if [ "$(desktop_kind)" = "plasma" ]; then
         items+=(kde-plasma/print-manager "Printers page in KDE System Settings" on)
     fi
     if ! ui_checklist "Printing on Linux goes through CUPS. Most printers from the last ten years print without any driver (driverless printing, also called IPP Everywhere or AirPrint) as long as they can be found on the network. Older printers need a driver package. Choose what to install:" "${items[@]}"; then
@@ -5344,7 +5846,7 @@ task_wifi() {
     busy "Looking for Wi-Fi hardware..."
     ifaces=$(wifi_ifaces)
     while IFS='|' read -r slot vendor drv name; do
-        [[ -n $slot ]] || continue
+        [ -n "$slot" ] || continue
         devs+=$'\n'"  ${name}"$'\n'"    driver in use: ${drv}"
     done < <(pci_devices "0x0280")
     if have lsusb; then
@@ -5352,14 +5854,14 @@ task_wifi() {
             devs+=$'\n'"  USB: ${dev#*ID }"
         done < <(lsusb 2>/dev/null | grep -iE "wireless|wlan|wi-fi|802\.11" || true)
     fi
-    if have rfkill; then rf=$(rfkill list wifi 2>/dev/null || true); fi
+    if have rfkill; then rf=$(LC_ALL=C rfkill list wifi 2>/dev/null || true); fi
     local text="Wi-Fi adapters found:${devs:-$'\n'"  none that the system recognises as Wi-Fi"}"$'\n'"Wi-Fi network interfaces: ${ifaces:-none}"
-    if [[ $rf == *"Hard blocked: yes"* ]]; then
+    if [[ $rf = *"Hard blocked: yes"* ]]; then
         text+=$'\n\n'"Wi-Fi is switched off by a hardware switch or key (for example Fn+F2 or an airplane-mode key). Switch it on there."
     fi
-    if [[ -z $devs && -z $ifaces ]]; then
+    if [ -z "$devs" ] && [ -z "$ifaces" ]; then
         text+=$'\n\n'"No Wi-Fi adapter was found. On a virtual machine that is normal. On real hardware, a USB adapter may need to be plugged in, or it may need the firmware or driver below."
-    elif [[ -n $devs && -z $ifaces ]]; then
+    elif [ -n "$devs" ] && [ -z "$ifaces" ]; then
         text+=$'\n\n'"An adapter is present but has no network interface: it is most likely missing its firmware or driver. Installing linux-firmware usually fixes this."
     fi
     items+=(sys-kernel/linux-firmware "Firmware for Wi-Fi adapters (most Intel, Realtek, MediaTek and Atheros cards need it)" on)
@@ -5367,16 +5869,36 @@ task_wifi() {
     items+=(net-misc/networkmanager "NetworkManager: connect from the network icon, or with 'nmtui' in a terminal" on)
     items+=(net-wireless/iw "iw, a Wi-Fi diagnostics tool" off)
     wlan_pci=$(pci_devices "0x0280")
-    if [[ $wlan_pci == *"|0x14e4|"* ]]; then
-        items+=(net-wireless/broadcom-sta "Broadcom 'wl' driver (proprietary, testing version; only for cards the open drivers do not support)" off)
-    fi
+    local bcm
+    bcm=$(broadcom_kind_here)
+    case "$bcm" in
+        wl)
+            text+=$'\n\n'"This Broadcom card (BCM4360, BCM4352, BCM43142 or BCM43228, found in most Macs from 2013 on) only works with Broadcom's proprietary 'wl' driver. Gentoo only has a testing (~amd64) version of it; tick it below and accept the testing version when asked."
+            items+=(net-wireless/broadcom-sta "Broadcom 'wl' driver (proprietary, testing version; needed for this card)" on) ;;
+        b43)
+            text+=$'\n\n'"This Broadcom card uses the open b43 driver, which needs Broadcom's firmware (accept its licence when asked)."
+            items+=(sys-firmware/b43-firmware "Firmware for this Broadcom card (b43 driver)" on) ;;
+        *)
+            if [[ $wlan_pci = *"|0x14e4|"* ]]; then
+                items+=(net-wireless/broadcom-sta "Broadcom 'wl' driver (proprietary, testing version; only for cards the open drivers do not support)" off)
+            fi ;;
+    esac
     if ! ui_checklist "${text}"$'\n\n'"Choose what to install:" "${items[@]}"; then return 0; fi
     sel=$CHOICE
     read -ra pkgs <<<"$sel"
     if (( ${#pkgs[@]} > 0 )); then
-        if [[ " $sel " == *" sys-kernel/linux-firmware "* ]] && ! pkg_installed sys-kernel/linux-firmware; then restart="yes"; fi
-        if [[ " $sel " == *" net-wireless/broadcom-sta "* ]]; then restart="yes"; fi
+        if [[ " $sel " = *" sys-kernel/linux-firmware "* ]] && ! pkg_installed sys-kernel/linux-firmware; then restart="yes"; fi
+        if [[ " $sel " = *" net-wireless/broadcom-sta "* || " $sel " = *" sys-firmware/b43-firmware "* ]]; then restart="yes"; fi
         install_packages "Wi-Fi support" "${pkgs[@]}" || return 0
+    fi
+    if [[ " $sel " = *" net-wireless/broadcom-sta "* ]] && pkg_installed net-wireless/broadcom-sta; then
+        if mkdir -p /etc/modprobe.d && printf '%s\n' "# Written by gentoo_helper: this computer's Broadcom Wi-Fi card needs the" \
+            "# proprietary wl driver (net-wireless/broadcom-sta). These open drivers would" \
+            "# claim the card first. Delete this file if you replace the card." \
+            "blacklist b43" "blacklist b43legacy" "blacklist bcma" "blacklist ssb" \
+            "blacklist brcmsmac" "blacklist brcmfmac" >/etc/modprobe.d/broadcom-wl-blacklist.conf; then
+            note+=$'\n'"The open Broadcom drivers are blocked in /etc/modprobe.d/broadcom-wl-blacklist.conf so wl can take the card."
+        fi
     fi
     if pkg_installed net-misc/networkmanager && ! svc_enabled NetworkManager; then
         TITLE="Wi-Fi"
@@ -5386,10 +5908,10 @@ task_wifi() {
             svc_enable_now NetworkManager || note+=$'\n'"NetworkManager could not be started; see ${LOG}."
         fi
     fi
-    if [[ $rf == *"Soft blocked: yes"* ]]; then
+    if [[ $rf = *"Soft blocked: yes"* ]]; then
         rfkill unblock wifi >>"$LOG" 2>&1 && note+=$'\n'"Wi-Fi was switched off in software; it has been switched on."
     fi
-    if [[ $restart == "yes" ]]; then note+=$'\n\n'"Restart the computer so the adapter can load its new firmware or driver."; fi
+    if [ "$restart" = "yes" ]; then note+=$'\n\n'"Restart the computer so the adapter can load its new firmware or driver."; fi
     TITLE="Wi-Fi"
     ui_msg "Done.${note}"$'\n\n'"To connect: click the network icon in your desktop's panel, or run 'nmtui' in a terminal and choose 'Activate a connection'."
 }
@@ -5410,17 +5932,17 @@ task_bluetooth() {
         items+=(pipewire-bt "Bluetooth headphones and speakers (rebuilds PipeWire with Bluetooth support)" on)
     fi
     local text="Bluetooth adapter found: ${hw}."
-    if [[ $hw == "no" ]]; then text+=" (Many adapters only show up once the Bluetooth system is installed and its firmware is present, so installing can still help. On a virtual machine there is usually none.)"; fi
+    if [ "$hw" = "no" ]; then text+=" (Many adapters only show up once the Bluetooth system is installed and its firmware is present, so installing can still help. On a virtual machine there is usually none.)"; fi
     if ! ui_checklist "${text}"$'\n\n'"Choose what to install:" "${items[@]}"; then return 0; fi
     sel=$CHOICE
     if [[ " $sel " != *" net-wireless/bluez "* ]]; then sel="net-wireless/bluez ${sel}"; fi
     local audio="no"
-    if [[ " $sel " == *" pipewire-bt "* ]]; then audio="yes"; sel=${sel//pipewire-bt/}; fi
+    if [[ " $sel " = *" pipewire-bt "* ]]; then audio="yes"; sel=${sel//pipewire-bt/}; fi
     read -ra pkgs <<<"$sel"
     install_packages "Bluetooth support" "${pkgs[@]}" || return 0
-    if [[ $audio == "yes" ]]; then
+    if [ "$audio" = "yes" ]; then
         add_settings "$USE_FILE" "media-video/pipewire bluetooth" "Bluetooth audio"
-        plan_and_run "Rebuild PipeWire with Bluetooth audio" --oneshot --update --newuse media-video/pipewire
+        plan_and_run "Rebuild PipeWire with Bluetooth audio" --oneshot --update --newuse media-video/pipewire || true
     fi
     svc_enable_now bluetooth || note+=$'\n'"The Bluetooth service could not be started; see ${LOG}."
     add_user_groups plugdev
@@ -5432,7 +5954,7 @@ task_bluetooth() {
 kernel_package() {
     local k
     for k in sys-kernel/gentoo-kernel-bin sys-kernel/gentoo-kernel; do
-        if pkg_installed "$k"; then echo "$k"; return 0; fi
+        if pkg_installed "$k"; then printf '%s\n' "$k"; return 0; fi
     done
     return 1
 }
@@ -5440,14 +5962,14 @@ kernel_package() {
 # Add a value to VIDEO_CARDS in make.conf (a backup is kept).
 add_video_card() {
     local card=$1 f=/etc/portage/make.conf cur
-    [[ -f $f ]] || return 1
+    [ -f "$f" ] || return 1
     cur=$(sed -n 's/^VIDEO_CARDS="\(.*\)"/\1/p' "$f" | tail -n1)
-    if [[ " $cur " == *" $card "* ]]; then return 0; fi
-    cp -p "$f" "${f}.bak-$(date +%Y%m%d-%H%M%S)"
+    if [[ " $cur " = *" $card "* ]]; then return 0; fi
+    cp -p -- "$f" "${f}.bak-$(date +%Y%m%d-%H%M%S)" || return 1
     if grep -q '^VIDEO_CARDS=' "$f"; then
-        sed -i "s/^VIDEO_CARDS=\".*\"/VIDEO_CARDS=\"$(trim "${cur} ${card}")\"/" "$f"
+        sed_inplace "s/^VIDEO_CARDS=\".*\"/VIDEO_CARDS=\"$(trim "${cur} ${card}")\"/" "$f"
     else
-        printf '\n# Added by gentoo-helper\nVIDEO_CARDS="%s"\n' "$card" >>"$f"
+        printf '\n# Added by gentoo_helper\nVIDEO_CARDS="%s"\n' "$card" >>"$f"
     fi
     log "VIDEO_CARDS: added ${card}"
 }
@@ -5460,7 +5982,7 @@ task_graphics() {
         summary=""
         has_nv="no"; has_intel="no"; has_amd="no"
         while IFS='|' read -r slot vendor drv name; do
-            [[ -n $slot ]] || continue
+            [ -n "$slot" ] || continue
             summary+=$'\n'"  ${name}"$'\n'"    driver in use: ${drv}"
             case "$vendor" in
                 0x10de) has_nv="yes" ;;
@@ -5469,12 +5991,12 @@ task_graphics() {
             esac
         done < <(pci_devices "0x03")
         local text="Graphics hardware:${summary:-$'\n'"  none found"}"
-        if [[ $has_amd == "yes" || $has_intel == "yes" ]]; then
+        if [ "$has_amd" = "yes" ] || [ "$has_intel" = "yes" ]; then
             text+=$'\n\n'"AMD and Intel graphics use the open-source drivers (Mesa) that are already installed; 3D and video work out of the box."
         fi
         items=()
-        if [[ $has_nv == "yes" ]]; then items+=(nvidia "Install the NVIDIA proprietary driver (best performance for NVIDIA cards)"); fi
-        if [[ $has_intel == "yes" ]]; then items+=(intelva "Hardware video decoding for Intel graphics (smoother video, less battery use)"); fi
+        if [ "$has_nv" = "yes" ]; then items+=(nvidia "Install the NVIDIA proprietary driver (best performance for NVIDIA cards)"); fi
+        if [ "$has_intel" = "yes" ]; then items+=(intelva "Hardware video decoding for Intel graphics (smoother video, less battery use)"); fi
         items+=(info "Show detailed graphics information")
         if ! ui_menu "$text" "${items[0]}" "${items[@]}"; then return 0; fi
         case "$CHOICE" in
@@ -5495,15 +6017,15 @@ task_graphics() {
             info)
                 f=$(tmpfile)
                 {
-                    echo "Graphics devices and their drivers (lspci -k):"
-                    echo
-                    if have lspci; then lspci -k 2>/dev/null | grep -A3 -Ei "vga|3d controller|display controller"; else echo "(lspci is not installed)"; fi
-                    echo
-                    echo "VIDEO_CARDS in /etc/portage/make.conf:"
-                    grep '^VIDEO_CARDS=' /etc/portage/make.conf 2>/dev/null || echo "(not set)"
-                    echo
-                    echo "Kernel modules loaded:"
-                    grep -E "^(nvidia|nouveau|amdgpu|radeon|i915|xe) " /proc/modules 2>/dev/null | awk '{print "  " $1}'
+                    printf '%s\n' "Graphics devices and their drivers (lspci -k):"
+                    printf '\n'
+                    if have lspci; then LC_ALL=C lspci -k 2>/dev/null | grep -A3 -Ei "vga|3d controller|display controller" || true; else printf '%s\n' "(lspci is not installed)"; fi
+                    printf '\n'
+                    printf '%s\n' "VIDEO_CARDS in /etc/portage/make.conf:"
+                    grep '^VIDEO_CARDS=' /etc/portage/make.conf 2>/dev/null || printf '%s\n' "(not set)"
+                    printf '\n'
+                    printf '%s\n' "Kernel modules loaded:"
+                    grep -E "^(nvidia|nouveau|amdgpu|radeon|i915|xe) " /proc/modules 2>/dev/null | awk '{print "  " $1}' || true
                 } >"$f"
                 TITLE="Graphics information"
                 ui_file "$f" ;;
@@ -5522,19 +6044,19 @@ task_graphics() {
 # It is a heuristic; nvidia-drivers itself checks the card again when installed.
 nvidia_generation() {
     local id
-    if [[ ! $1 =~ ^0x[0-9a-fA-F]+$ ]]; then echo "current"; return 0; fi
+    if [[ ! $1 =~ ^0x[0-9a-fA-F]+$ ]]; then printf '%s\n' "current"; return 0; fi
     id=$(( $1 ))
-    if (( id >= 0x1e00 )); then echo "current"
-    elif (( id >= 0x1340 )); then echo "legacy580"
-    else echo "unsupported"; fi
+    if (( id >= 0x1e00 )); then printf '%s\n' "current"
+    elif (( id >= 0x1340 )); then printf '%s\n' "legacy580"
+    else printf '%s\n' "unsupported"; fi
 }
 
 # The generation of the oldest NVIDIA graphics card in this computer (empty if none).
 nvidia_gen_here() {
     local d gen result=""
     for d in /sys/bus/pci/devices/*; do
-        [[ -r $d/vendor && -r $d/class ]] || continue
-        [[ $(<"$d/vendor") == "0x10de" && $(<"$d/class") == 0x03* ]] || continue
+        [ -r "$d/vendor" ] && [ -r "$d/class" ] || continue
+        [[ $(<"$d/vendor") = "0x10de" && $(<"$d/class") = 0x03* ]] || continue
         gen=$(nvidia_generation "$(cat "$d/device" 2>/dev/null)")
         case "${result}:${gen}" in
             :*|current:legacy580|current:unsupported|legacy580:unsupported) result=$gen ;;
@@ -5551,23 +6073,23 @@ task_nvidia() {
         return 0
     fi
     gen=$(nvidia_gen_here)
-    if [[ $gen == "unsupported" ]]; then
+    if [ "$gen" = "unsupported" ]; then
         ui_msg "This NVIDIA card is from the Kepler generation or older (such as most GeForce GTX 600 and 700 series cards). NVIDIA no longer supports it in its proprietary driver, and Gentoo masks the old driver branches because they no longer get security fixes."$'\n\n'"Keep using the open source Nouveau driver, which is already part of the system. 3D performance is lower, but it is maintained."
         return 0
     fi
-    if [[ $gen == "legacy580" ]]; then
+    if [ "$gen" = "legacy580" ]; then
         branch_text=$'\n\n'"This card is from the Maxwell, Pascal or Volta generation (for example GeForce GTX 750, 900 or 10xx series). NVIDIA drivers 595 and newer no longer support it, so the helper keeps the driver on the 580 branch, the last one that does, by adding '>=x11-drivers/nvidia-drivers-581' to ${MASK_FILE}."
     fi
     if ! ui_yesno "This installs NVIDIA's proprietary driver:"$'\n\n'"1. Installs x11-drivers/nvidia-drivers (if your licence settings require it, you are asked to accept NVIDIA's licence)."$'\n'"2. Adds 'nvidia' to VIDEO_CARDS in /etc/portage/make.conf (a backup is kept)."$'\n'"3. Makes sure kernel mode setting is on (current drivers enable it by default; it matters for older branches and for Wayland)."$'\n'"4. Rebuilds the initramfs so the open-source nouveau driver no longer loads first.${branch_text}"$'\n\n'"A restart is needed afterwards. Continue?" y; then
         return 0
     fi
-    if [[ $gen == "legacy580" ]]; then
+    if [ "$gen" = "legacy580" ]; then
         add_settings "$MASK_FILE" ">=x11-drivers/nvidia-drivers-581" "NVIDIA card supported up to the 580 driver branch"
     fi
     install_packages "Install the NVIDIA driver" x11-drivers/nvidia-drivers || return 0
     add_video_card nvidia || note+=$'\n'"Could not update VIDEO_CARDS in /etc/portage/make.conf."
     if ! grep -rqsE "nvidia[-_]drm.*modeset=1" /etc/modprobe.d/ && [[ " $(cat /proc/cmdline) " != *"nvidia_drm.modeset=1"* && " $(cat /proc/cmdline) " != *"nvidia-drm.modeset=1"* ]]; then
-        if mkdir -p /etc/modprobe.d && printf '# Added by gentoo-helper: kernel mode setting for the NVIDIA driver\n# (default in current drivers; needed for older branches and Wayland)\noptions nvidia_drm modeset=1\n' >/etc/modprobe.d/nvidia-drm-modeset.conf; then
+        if mkdir -p /etc/modprobe.d && printf '# Added by gentoo_helper: kernel mode setting for the NVIDIA driver\n# (default in current drivers; needed for older branches and Wayland)\noptions nvidia_drm modeset=1\n' >/etc/modprobe.d/nvidia-drm-modeset.conf; then
             log "Wrote /etc/modprobe.d/nvidia-drm-modeset.conf"
         else
             note+=$'\n'"Could not write /etc/modprobe.d/nvidia-drm-modeset.conf."
@@ -5580,7 +6102,7 @@ task_nvidia() {
         note+=$'\n'"No distribution kernel was found, so the initramfs was not rebuilt. If you build your own kernel, rebuild its initramfs yourself."
     fi
     TITLE="NVIDIA driver"
-    ui_msg "The NVIDIA driver is installed.${note}"$'\n\n'"Restart the computer now. Afterwards, run 'Update the whole system' once so packages pick up the new VIDEO_CARDS setting."$'\n\n'"If the screen stays black after the restart, choose the previous kernel or boot entry, or switch to a text console with Ctrl+Alt+F2 and run gentoo-helper from there."
+    ui_msg "The NVIDIA driver is installed.${note}"$'\n\n'"Restart the computer now. Afterwards, run 'Update the whole system' once so packages pick up the new VIDEO_CARDS setting."$'\n\n'"If the screen stays black after the restart, choose the previous kernel or boot entry, or switch to a text console with Ctrl+Alt+F2 and run gentoo_helper from there."
 }
 
 task_codecs() {
@@ -5616,7 +6138,7 @@ task_ssh() {
             off "Turn the SSH server off"; then
             return 0
         fi
-        if [[ $CHOICE == "off" ]]; then
+        if [ "$CHOICE" = "off" ]; then
             svc_disable_now sshd
             ui_msg "The SSH server is stopped and will not start at boot any more."
         fi
@@ -5628,7 +6150,7 @@ task_ssh() {
     install_packages "SSH server" net-misc/openssh || return 0
     ssh-keygen -A >>"$LOG" 2>&1 || true
     svc_enable_now sshd || note+=$'\n'"The SSH service could not be started; see ${LOG}."
-    if have ufw && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then
+    if have ufw && [[ $(LC_ALL=C ufw status 2>/dev/null) = *"Status: active"* ]]; then
         ufw allow ssh >>"$LOG" 2>&1 && note+=$'\n'"The firewall now allows SSH connections."
     fi
     ui_msg "The SSH server is on and starts at every boot.${note}"$'\n\n'"From another computer on your network, connect with:"$'\n'"  ssh ${user:-yourname}@ADDRESS"$'\n\n'"This computer's addresses:"$'\n'"$(ip_addresses)"$'\n\n'"For more security, set up SSH keys and turn off password logins (Gentoo wiki page 'SSH')."
@@ -5637,7 +6159,7 @@ task_ssh() {
 task_firewall() {
     local status allow_ssh="no" f
     TITLE="Firewall"
-    if have ufw && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then
+    if have ufw && [[ $(LC_ALL=C ufw status 2>/dev/null) = *"Status: active"* ]]; then
         if ! ui_menu "The firewall (ufw) is on: incoming connections are blocked unless allowed." "status" \
             status "Show the firewall rules" \
             off "Turn the firewall off"; then
@@ -5646,11 +6168,11 @@ task_firewall() {
         case "$CHOICE" in
             status)
                 f=$(tmpfile)
-                ufw status verbose >"$f" 2>&1
+                ufw status verbose >"$f" 2>&1 || true
                 ui_file "$f" ;;
             off)
                 if ui_yesno "Turn the firewall off?" n; then
-                    ufw disable >>"$LOG" 2>&1
+                    ufw disable >>"$LOG" 2>&1 || true
                     svc_disable_now ufw
                     ui_msg "The firewall is off."
                 fi ;;
@@ -5665,13 +6187,13 @@ task_firewall() {
     {
         ufw default deny incoming
         ufw default allow outgoing
-        if [[ $allow_ssh == "yes" ]]; then ufw allow ssh; fi
+        if [ "$allow_ssh" = "yes" ]; then ufw allow ssh; fi
         ufw --force enable
-    } >>"$LOG" 2>&1
+    } >>"$LOG" 2>&1 || true
     svc_enable_now ufw || true
-    status=$(ufw status 2>/dev/null || true)
-    if [[ $status == *"Status: active"* ]]; then
-        ui_msg "The firewall is on and starts at every boot.$( [[ $allow_ssh == yes ]] && printf '%s' $'\n\n'"SSH connections are still allowed because the SSH server is running." )"
+    status=$(LC_ALL=C ufw status 2>/dev/null || true)
+    if [[ $status = *"Status: active"* ]]; then
+        ui_msg "The firewall is on and starts at every boot.$( [ "$allow_ssh" = yes ] && printf '%s' $'\n\n'"SSH connections are still allowed because the SSH server is running." )"
     else
         ui_msg "ufw is installed, but turning it on failed. The details are in ${LOG}."
     fi
@@ -5722,7 +6244,7 @@ task_vms() {
     local virt="no" note=""
     TITLE="Virtual machines"
     if grep -qwE "vmx|svm" /proc/cpuinfo; then virt="yes"; fi
-    if [[ $virt == "no" ]]; then
+    if [ "$virt" = "no" ]; then
         ui_msg "This CPU does not report hardware virtualization (Intel VT-x or AMD-V). It may be switched off in the firmware (BIOS/UEFI) settings, or this is already a virtual machine without nested virtualization. Virtual machines would run very slowly without it."
         ui_yesno "Install the virtual machine tools anyway?" n || return 0
     fi
@@ -5754,6 +6276,77 @@ task_steam() {
     fi
 }
 
+task_laptop() {
+    local sel note="" cpu tool kind thermal="off"
+    local -a items=() pkgs=()
+    TITLE="Laptop and Mac hardware"
+    cpu=$(awk -F': *' '/^vendor_id/ {print $2; exit}' /proc/cpuinfo)
+    kind=$(desktop_kind)
+    if pkg_installed sys-power/tlp; then tool="tlp"
+    elif pkg_installed sys-power/power-profiles-daemon; then tool="ppd"
+    elif [ "$kind" = "plasma" ] || [ "$kind" = "gnome" ]; then tool="ppd"
+    else tool="tlp"; fi
+    local text="Power and cooling for laptops and Macs."
+    if is_laptop; then
+        thermal="on"
+        if [ "$tool" = "ppd" ]; then
+            items+=(sys-power/power-profiles-daemon "Power profiles: power saving, balanced or performance from the battery menu" on)
+        else
+            items+=(sys-power/tlp "TLP: automatic power saving on battery (CPU, disks, Wi-Fi, USB)" on)
+        fi
+        text+=" power-profiles-daemon and TLP do the same job and cannot be installed together, so only one is offered: power-profiles-daemon for KDE Plasma and GNOME, which use it, and TLP otherwise."
+    fi
+    if [ "$cpu" = "GenuineIntel" ]; then
+        items+=(sys-power/thermald "thermald: keeps Intel CPUs from overheating" "$thermal")
+    fi
+    if is_apple; then
+        items+=(app-laptop/mbpfan "mbpfan: fan control for Intel Macs (testing version)" on)
+        text+=$'\n\n'"Linux does not control Intel Mac fans by itself. mbpfan does; Gentoo only has a testing (~amd64) version, so accept it when asked."
+    fi
+    if [ "$(gpu_count)" -ge 2 ]; then
+        items+=(sys-power/switcheroo-control "switcheroo-control: lets the desktop start programs on the dedicated graphics chip" on)
+    fi
+    if [ "${#items[@]}" -eq 0 ]; then
+        ui_msg "Nothing to set up: this does not look like a laptop or a Mac, and it has one graphics chip."
+        return 0
+    fi
+    if ! ui_checklist "${text}"$'\n\n'"Choose what to install:" "${items[@]}"; then return 0; fi
+    sel=$CHOICE
+    read -ra pkgs <<<"$sel"
+    if [ "${#pkgs[@]}" -eq 0 ]; then return 0; fi
+    install_packages "Laptop and Mac hardware" "${pkgs[@]}" || return 0
+    if [[ " $sel " = *" sys-power/power-profiles-daemon "* ]]; then
+        svc_enable_now power-profiles-daemon || note+=$'\n'"power-profiles-daemon could not be started; see ${LOG}."
+    fi
+    if [[ " $sel " = *" sys-power/tlp "* ]]; then
+        svc_enable_now tlp || note+=$'\n'"TLP could not be started; see ${LOG}."
+    fi
+    if [[ " $sel " = *" sys-power/thermald "* ]]; then
+        svc_enable_now thermald || note+=$'\n'"thermald could not be started; see ${LOG}."
+    fi
+    if [[ " $sel " = *" app-laptop/mbpfan "* ]]; then
+        mkdir -p /etc/modules-load.d
+        printf '%s\n' "# Sensors for mbpfan. Written by gentoo_helper" "applesmc" "coretemp" >/etc/modules-load.d/mbpfan.conf
+        modprobe applesmc >>"$LOG" 2>&1 || true
+        modprobe coretemp >>"$LOG" 2>&1 || true
+        svc_enable_now mbpfan || note+=$'\n'"mbpfan could not be started; see ${LOG}."
+    fi
+    if [[ " $sel " = *" sys-power/switcheroo-control "* ]]; then
+        svc_enable_now switcheroo-control || note+=$'\n'"switcheroo-control could not be started; see ${LOG}."
+    fi
+    TITLE="Laptop and Mac hardware"
+    ui_msg "Done.${note}"
+}
+
+task_firmware() {
+    TITLE="Firmware updates"
+    if ! ui_yesno "fwupd installs firmware updates published by hardware makers through the Linux Vendor Firmware Service (LVFS): system firmware (BIOS/UEFI) for many Dell, Lenovo, HP and Framework computers, plus SSDs, docks, keyboards and more. It never updates anything without asking."$'\n\n'"Install fwupd?" y; then
+        return 0
+    fi
+    install_packages "Firmware updates" sys-apps/fwupd || return 0
+    ui_msg "fwupd is installed. To check for and install updates, open a terminal and run:"$'\n\n'"  fwupdmgr refresh"$'\n'"  fwupdmgr get-updates"$'\n'"  fwupdmgr update"$'\n\n'"GNOME Software and KDE Discover also show firmware updates once fwupd is installed. Keep laptops plugged in while firmware updates."
+}
+
 tasks_menu() {
     local def="printing"
     while true; do
@@ -5764,6 +6357,8 @@ tasks_menu() {
             wifi "$(task_label wifi "Wi-Fi")"
             bluetooth "$(task_label bluetooth "Bluetooth")"
             graphics "Graphics drivers (NVIDIA, Intel video decoding)"
+            laptop "Laptop and Mac hardware (power saving, cooling, Mac fans)"
+            firmware "Firmware updates (fwupd)"
             codecs "$(task_label codecs "Audio and video codecs")"
             ssh "$(task_label ssh "SSH server (log in from other computers)")"
             firewall "$(task_label firewall "Firewall")"
@@ -5782,6 +6377,8 @@ tasks_menu() {
             wifi) task_wifi ;;
             bluetooth) task_bluetooth ;;
             graphics) task_graphics ;;
+            laptop) task_laptop ;;
+            firmware) task_firmware ;;
             codecs) task_codecs ;;
             ssh) task_ssh ;;
             firewall) task_firewall ;;
@@ -5836,9 +6433,10 @@ Configuration file updates
 
 Common tasks
   Ready-made recipes for printing, scanners, Wi-Fi, Bluetooth, graphics
-  drivers, codecs, the SSH server, a firewall, fonts, archive formats,
-  virtual machines and Steam: they install what is needed, switch on the
-  right services and add your user to the right groups.
+  drivers, laptop and Mac hardware, firmware updates, codecs, the SSH
+  server, a firewall, fonts, archive formats, virtual machines and Steam:
+  they install what is needed, switch on the right services and add your
+  user to the right groups.
 
 Flatpak
   An alternative for desktop apps: ready-made, sandboxed, updated
@@ -5859,20 +6457,22 @@ EOF
 
 usage() {
     cat <<EOF
-gentoo-helper ${VERSION}: simple menus for everyday Gentoo package management
+gentoo_helper ${VERSION}: simple menus for everyday Gentoo package management
 
-  gentoo-helper                  menus
-  gentoo-helper update           update the whole system
-  gentoo-helper install NAME     find and install a package
-  gentoo-helper remove NAME      remove a package
-  gentoo-helper clean            remove unneeded packages, free disk space
-  gentoo-helper news             read Gentoo news
-  gentoo-helper configs          review configuration file updates
-  gentoo-helper flatpak          Flatpak apps
-  gentoo-helper tasks            common tasks: printing, Wi-Fi, drivers, codecs, SSH, ...
-  gentoo-helper help             this text
+  gentoo_helper                  menus
+  gentoo_helper update           update the whole system
+  gentoo_helper install NAME     find and install a package
+  gentoo_helper remove NAME      remove a package
+  gentoo_helper clean            remove unneeded packages, free disk space
+  gentoo_helper news             read Gentoo news
+  gentoo_helper configs          review configuration file updates
+  gentoo_helper flatpak          Flatpak apps
+  gentoo_helper tasks            common tasks: printing, Wi-Fi, drivers, laptops, SSH, ...
+  gentoo_helper -t COMMAND       use plain text menus instead of dialog
+  gentoo_helper -h               this text
+  gentoo_helper -V               show the version
 
-Set GENTOO_HELPER_UI=text to use plain text menus instead of dialog.
+Setting GENTOO_HELPER_UI=text also selects plain text menus.
 EOF
 }
 
@@ -5911,52 +6511,96 @@ main_menu() {
 }
 
 ensure_gentoo() {
-    if [[ ! -f /etc/gentoo-release ]] || ! have emerge; then
-        echo "gentoo-helper only works on Gentoo Linux (emerge was not found)." >&2
+    if [ ! -f /etc/gentoo-release ] || ! have emerge; then
+        printf '%s\n' "gentoo_helper only works on Gentoo Linux (emerge was not found)." >&2
+        exit 1
+    fi
+}
+
+# Commands this helper cannot work without. Optional ones (dialog, flatpak,
+# lspci, ...) are checked where they are used.
+REQUIRED_COMMANDS=(emerge portageq eselect awk sed grep fold sort tr cut head tail wc df du find mktemp date id getent usermod python3)
+
+check_commands() {
+    local c
+    local -a missing=()
+    for c in "${REQUIRED_COMMANDS[@]}"; do
+        have "$c" || missing+=("$c")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        printf 'gentoo_helper needs these commands, which were not found: %s\n' "${missing[*]}" >&2
+        exit 1
+    fi
+}
+
+check_bash_version() {
+    if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+        printf 'gentoo_helper needs bash 4.4 or newer (this is bash %s).\n' "$BASH_VERSION" >&2
         exit 1
     fi
 }
 
 ensure_root() {
     local self
-    if [[ $EUID -eq 0 ]]; then return 0; fi
-    self=$(readlink -f "${BASH_SOURCE[0]}")
-    echo "Managing packages needs administrator rights; asking for your password."
+    if [ "$(id -u)" -eq 0 ]; then return 0; fi
+    self=$(self_path)
+    printf '%s\n' "Managing packages needs administrator rights; asking for your password."
     if have sudo; then exec sudo -- "$self" "$@"; fi
     if have doas; then exec doas -- "$self" "$@"; fi
-    echo "Neither sudo nor doas is available. Run gentoo-helper as root." >&2
+    printf '%s\n' "Neither sudo nor doas is available. Run gentoo_helper as root." >&2
     exit 1
 }
 
 ui_init() {
-    if [[ ${GENTOO_HELPER_UI:-} == "text" ]]; then UI="text"; return 0; fi
-    if [[ ! -t 0 || ! -t 1 ]]; then UI="text"; return 0; fi
+    if [ "${GENTOO_HELPER_UI:-}" = "text" ]; then UI="text"; return 0; fi
+    if [ ! -t 0 ] || [ ! -t 1 ]; then UI="text"; return 0; fi
     if have dialog; then UI="dialog"; return 0; fi
     UI="text"
-    if [[ -e ${STATE_DIR}/no-dialog ]]; then return 0; fi
+    if [ -e "${STATE_DIR}/no-dialog" ]; then return 0; fi
     TITLE="Gentoo Helper"
     if ui_yesno "The menus are easier to use with the small 'dialog' program, which is not installed yet. Install it now? (usually under a minute)" y; then
-        run_emerge dev-util/dialog
+        run_emerge dev-util/dialog || true
         if have dialog; then UI="dialog"; fi
     else
-        touch "${STATE_DIR}/no-dialog"
+        touch -- "${STATE_DIR}/no-dialog"
         say "OK, using plain text menus. (Install dev-util/dialog any time to get the other menus.)"
     fi
 }
 
 main() {
-    case "${1:-}" in
-        -h|--help|help) usage; return 0 ;;
-        --version) echo "gentoo-helper ${VERSION}"; return 0 ;;
-    esac
+    local opt arg
+    local -a orig=("$@") args=()
+    check_bash_version
+    # Long options are translated to short ones, then read with getopts.
+    for arg in "$@"; do
+        case "$arg" in
+            --help|help) args+=(-h) ;;
+            --version) args+=(-V) ;;
+            --text) args+=(-t) ;;
+            --*) usage >&2; return 1 ;;
+            *) args+=("$arg") ;;
+        esac
+    done
+    set -- "${args[@]}"
+    OPTIND=1
+    while getopts ':hVt' opt; do
+        case "$opt" in
+            h) usage; return 0 ;;
+            V) printf 'gentoo_helper %s\n' "$VERSION"; return 0 ;;
+            t) GENTOO_HELPER_UI="text" ;;
+            *) usage >&2; return 1 ;;
+        esac
+    done
+    shift $(( OPTIND - 1 ))
     ensure_gentoo
-    ensure_root "$@"
-    mkdir -p "$STATE_DIR"
-    touch "$LOG"
-    WORK_DIR=$(mktemp -d /tmp/gentoo-helper.XXXXXX)
+    check_commands
+    ensure_root "${orig[@]}"
+    mkdir -p -- "$STATE_DIR"
+    touch -- "$LOG"
+    WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gentoo_helper.XXXXXX")
     trap cleanup EXIT
-    trap 'cleanup; echo; exit 130' INT
-    log "gentoo-helper ${VERSION} started: $*"
+    trap 'cleanup; printf "\n"; exit 130' INT
+    log "gentoo_helper ${VERSION} started: $*"
     ui_init
     local cmd=${1:-}
     if (( $# > 0 )); then shift; fi
@@ -5972,58 +6616,923 @@ main() {
         tasks) tasks_menu ;;
         *) usage; return 1 ;;
     esac
-    if [[ $UI == "dialog" ]]; then clear_screen; fi
+    if [ "$UI" = "dialog" ]; then clear_screen; fi
 }
 
-if [[ "${BASH_SOURCE[0]:-}" == "$0" || -z "${BASH_SOURCE[0]:-}" ]]; then
+if [ "${BASH_SOURCE[0]:-}" = "$0" ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
     main "$@"
 fi
 GENTOO_HELPER_SCRIPT_EOF
-    chmod 755 /usr/local/bin/gentoo-helper
+    chmod 755 /usr/local/bin/gentoo_helper
+}
+
+# ============================================================================
+# TUI front end (dialog, or whiptail as a fallback)
+#
+# The questions and the installation engine are shared with the console
+# installer. This layer renders the shared prompt helpers (choose, ask,
+# yesno, ...) as dialog boxes, and adds a main menu from which each section
+# can be opened, changed or discarded on its own.
+#
+# Explanations printed with say/info/warn are collected and shown in the next
+# dialog box, so every question keeps its explanation.
+# ============================================================================
+
+TUI_ACTIVE="no"       # yes while dialogs are used (setup and the final questions)
+TUI_AUTO="no"         # yes while a section is silently filled in with its defaults
+TUI_PHASE="setup"     # setup, then finish after the installation
+TUI_BIN=""
+TUI_BUF=""            # text collected for the next dialog box
+TUI_SECTION="Gentoo Installer"
+TUI_TITLE="Gentoo Installer"
+TUI_OUT=""
+TUI_TEXT=""
+TUI_TEXTLINES=0
+TUI_MAXH=20; TUI_BOXW=74
+TUI_COMMON=(); TUI_NOTAGS=(); TUI_PWOPT=(); TUI_SCROLL=()
+IN_SECTION="no"
+CFG_ERRORS=(); CFG_NOTES=()
+BACKTITLE="Gentoo Linux installer ${SCRIPT_VERSION}   |   Arrows/Tab: move   Space: tick   Enter: OK   Esc: back"
+
+declare -A SEC_STATE=()
+declare -A SEC_FN=([sys]=q_system_type [disk]=q_disk_layout [region]=q_region
+                   [acct]=q_accounts [hw]=q_hardware_network [sw]=q_software)
+declare -A SEC_VARS=(
+    [sys]="DE DM SWAY_AUTOSTART INIT USE_BINPKG BINHOST_V3 TUNE_CPU_FLAGS KERNEL_PKG"
+    [region]="NEW_HOSTNAME TIMEZONE LOCALE XKB_LAYOUT XKB_VARIANT"
+    [hw]="GPU_DRIVER VIDEO_CARDS NET_TOOL WANT_BT WANT_CUPS WANT_SSH WANT_BCM_WL WANT_POWER POWER_TOOL WANT_MBPFAN"
+    [sw]="GENTOO_MIRRORS_VALUE WANT_FLATPAK FLATPAK_APPS EXTRA_PKGS"
+)
+SEC_ORDER=(sys disk region acct hw sw)
+
+usage() {
+    cat <<EOF
+gentoo_install_tui.sh ${SCRIPT_VERSION}: guided Gentoo Linux installer for amd64 (menu version)
+
+Usage:
+  bash gentoo_install_tui.sh                 Start a new installation
+  bash gentoo_install_tui.sh -r, --resume    Continue after fixing a failed step
+  bash gentoo_install_tui.sh -h, --help      Show this help
+
+Needs 'dialog' (included on the official Gentoo live images) or 'whiptail'.
+Run it as root. Download it first, then run it; piping it into bash does not
+work because the installer reads your answers from the keyboard.
+EOF
 }
 
 # ----------------------------------------------------------------------------
-# Entry point
+# Low-level dialog helpers
+# ----------------------------------------------------------------------------
+tui_init() {
+    if have dialog; then
+        TUI_BIN="dialog"
+        TUI_COMMON=(--cr-wrap --no-collapse)
+        TUI_NOTAGS=(--no-tags)
+        TUI_PWOPT=(--insecure)
+        TUI_SCROLL=(--exit-label "OK")
+    elif have whiptail; then
+        TUI_BIN="whiptail"
+        TUI_COMMON=()
+        TUI_NOTAGS=(--notags)
+        TUI_PWOPT=()
+        TUI_SCROLL=(--scrolltext)
+    else
+        die "The menu version needs 'dialog' or 'whiptail', and neither is installed on this live system. Use the console version instead: curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo_install.sh && bash gentoo_install.sh"
+    fi
+    tui_dims
+    log "TUI front end: ${TUI_BIN}"
+}
+
+tui_dims() {
+    local h w
+    h=$(tput lines 2>/dev/null || printf '%s\n' 24)
+    w=$(tput cols 2>/dev/null || printf '%s\n' 80)
+    [[ $h =~ ^[0-9]+$ ]] || h=24
+    [[ $w =~ ^[0-9]+$ ]] || w=80
+    TUI_MAXH=$(( h - 4 ))
+    TUI_MAXH=$(( TUI_MAXH < 12 ? 12 : TUI_MAXH ))
+    TUI_BOXW=$(( w - 6 ))
+    TUI_BOXW=$(( TUI_BOXW > 100 ? 100 : TUI_BOXW ))
+    TUI_BOXW=$(( TUI_BOXW < 50 ? 50 : TUI_BOXW ))
+}
+
+# tui_lines TEXT WIDTH: number of lines TEXT takes when wrapped at WIDTH.
+tui_clear() {
+    clear 2>/dev/null || printf '\033[H\033[2J' || true
+}
+
+tui_lines() {
+    printf '%s\n' "$1" | fold -s -w "$2" | wc -l
+}
+
+# tui_call WIDGET-ARGS...: run dialog/whiptail. The selection ends up in TUI_OUT.
+tui_call() {
+    local __tc_rc=0
+    TUI_OUT=$("$TUI_BIN" "${TUI_COMMON[@]}" --backtitle "$BACKTITLE" --title " ${TUI_TITLE} " "$@" 3>&1 1>&2 2>&3) || __tc_rc=$?
+    # Cancel (1) and Esc (255) produce no output. Any other failure, or a failure
+    # that printed a message, means dialog itself broke (for example a box that
+    # cannot fit the terminal); stop instead of looping on a dialog that keeps failing.
+    if (( __tc_rc != 0 )) && { [ -n "$TUI_OUT" ] || (( __tc_rc != 1 && __tc_rc != 255 )); }; then
+        tui_fatal "${TUI_BIN} failed (exit code ${__tc_rc}): ${TUI_OUT:-no message}"
+    fi
+    return "$__tc_rc"
+}
+
+# Stop without using dialog, which is the thing that failed.
+tui_fatal() {
+    tui_clear
+    TUI_ACTIVE="no"
+    log "FAIL: $*"
+    err "$*"
+    err "Try a larger terminal window, or use the console installer (gentoo_install.sh), which asks the same questions."
+    exit 1
+}
+
+tui_buf_add() {
+    if [ -n "$TUI_BUF" ]; then TUI_BUF+=$'\n\n'; fi
+    TUI_BUF+=$1
+}
+
+# tui_fit QUESTION LIST_LENGTH WIDTH: combine the collected text with QUESTION into
+# TUI_TEXT. If that would not fit on screen next to the list, the collected text
+# is shown on its own first.
+tui_fit() {
+    local q=$1 n=$2 w=$3 buf=$TUI_BUF text lines min_list
+    TUI_BUF=""
+    text=$buf
+    if [ -n "$text" ]; then text+=$'\n\n'; fi
+    text+=$q
+    min_list=$(( n < 4 ? n : 4 ))
+    lines=$(tui_lines "$text" $(( w - 4 )))
+    if (( lines + min_list + 8 > TUI_MAXH )) && [ -n "$buf" ]; then
+        tui_show "$buf"
+        text=$q
+        lines=$(tui_lines "$text" $(( w - 4 )))
+    fi
+    TUI_TEXT=$text
+    TUI_TEXTLINES=$lines
+}
+
+# tui_show TEXT: a message box, or a scrollable text box when TEXT is long.
+tui_show() {
+    local text=$1 lines tmp
+    tui_dims
+    lines=$(tui_lines "$text" $(( TUI_BOXW - 4 )))
+    if (( lines + 6 > TUI_MAXH )); then
+        tmp=$(work_file text)
+        printf '%s\n' "$text" | fold -s -w $(( TUI_BOXW - 4 )) >"$tmp"
+        tui_call "${TUI_SCROLL[@]}" --textbox "$tmp" "$TUI_MAXH" "$TUI_BOXW" || true
+        rm -f -- "$tmp"
+    else
+        tui_call --msgbox "$text" $(( lines + 6 )) "$TUI_BOXW" || true
+    fi
+}
+
+tui_quit() {
+    if [ "$IN_SECTION" = "yes" ]; then exit 11; fi
+    tui_clear
+    TUI_ACTIVE="no"
+    log "Quit from the TUI"
+    if [ "$TUI_PHASE" = "setup" ]; then
+        printf '%s\n' "Gentoo installer: quit. Nothing on disk was changed."
+    fi
+    exit 0
+}
+
+# Called when a dialog is cancelled (Esc or the Cancel button).
+tui_cancelled() {
+    local -a items=(1 "Continue where I was")
+    if [ "$IN_SECTION" = "yes" ]; then
+        items+=(2 "Back to the main menu (discard the changes made in this section)")
+    fi
+    if [ "$TUI_PHASE" = "setup" ]; then
+        items+=(3 "Quit the installer (nothing on disk has been changed)")
+    else
+        items+=(3 "Quit the installer")
+    fi
+    tui_dims
+    if ! tui_call "${TUI_NOTAGS[@]}" --menu "You pressed Esc or Cancel. What would you like to do?" 12 "$TUI_BOXW" 3 "${items[@]}"; then
+        return 0
+    fi
+    case "$TUI_OUT" in
+        2) exit 10 ;;
+        3) tui_quit ;;
+    esac
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Dialog versions of the shared prompt helpers
+# ----------------------------------------------------------------------------
+tui_say() {
+    local p
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
+    for p in "$@"; do tui_buf_add "$p"; done
+}
+
+tui_say_pre() {
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
+    tui_buf_add "$1"
+}
+
+tui_section() {
+    log "===== $* ====="
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
+    TUI_SECTION="$*"
+    TUI_TITLE="$*"
+    TUI_BUF=""
+}
+
+tui_subsection() {
+    log "--- $* ---"
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
+    TUI_TITLE="${TUI_SECTION} > $*"
+}
+
+# Short status messages: shown right away in a small box, and kept for the next dialog.
+tui_info() {
+    log "INFO: $*"
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
+    tui_buf_add "$*"
+    tui_dims
+    "$TUI_BIN" "${TUI_COMMON[@]}" --backtitle "$BACKTITLE" --title " ${TUI_TITLE} " \
+        --infobox "$*" $(( $(tui_lines "$*" $(( TUI_BOXW - 4 ))) + 4 )) "$TUI_BOXW" 2>/dev/null || true
+}
+
+tui_warn() {
+    log "WARN: $*"
+    if [ "$TUI_AUTO" = "yes" ]; then return 0; fi
+    tui_buf_add "WARNING: $*"
+}
+
+tui_die() {
+    log "FAIL: $*"
+    TUI_BUF=""
+    tui_show "Error: $*"$'\n\n'"The log is in ${LOG}."
+    tui_clear
+    TUI_ACTIVE="no"
+    err "$*"
+    exit 1
+}
+
+tui_run() {
+    log "RUN: $*"
+    "$@" >>"$LOG" 2>&1
+}
+
+tui_pause() {
+    local t
+    if [ "$TUI_AUTO" = "yes" ] || [ -z "$TUI_BUF" ]; then return 0; fi
+    t=$TUI_BUF
+    TUI_BUF=""
+    tui_show "$t"
+}
+
+tui_handoff_screen() {
+    tui_clear
+}
+
+# tui_choose VAR "Question" DEFAULT "value|Label" ...
+tui_choose() {
+    local __var=$1 __q=$2 __def=$3
+    shift 3
+    local -a __vals=() __items=()
+    local __o __i=0 __defi=1 __maxl=20 __w __lh __h __text
+    for __o in "$@"; do
+        __i=$(( __i + 1 ))
+        __vals+=("${__o%%|*}")
+        __items+=("$__i" "${__o#*|}")
+        if [ "${__o%%|*}" = "$__def" ]; then __defi=$__i; fi
+        if (( ${#__o} > __maxl )); then __maxl=${#__o}; fi
+    done
+    if [ "$TUI_AUTO" = "yes" ]; then
+        printf -v "$__var" '%s' "${__vals[__defi - 1]}"
+        log "DEFAULT: ${__q} => ${__vals[__defi - 1]}"
+        return 0
+    fi
+    tui_dims
+    __w=$(( __maxl + 14 ))
+    __w=$(( __w < 60 ? 60 : __w ))
+    __w=$(( __w > TUI_BOXW ? TUI_BOXW : __w ))
+    tui_fit "$__q" "${#__vals[@]}" "$__w"
+    __text=$TUI_TEXT
+    __lh=$(( TUI_MAXH - TUI_TEXTLINES - 8 ))
+    __lh=$(( __lh > ${#__vals[@]} ? ${#__vals[@]} : __lh ))
+    __lh=$(( __lh < 2 ? 2 : __lh ))
+    __h=$(( TUI_TEXTLINES + __lh + 8 ))
+    __h=$(( __h > TUI_MAXH ? TUI_MAXH : __h ))
+    while true; do
+        if tui_call "${TUI_NOTAGS[@]}" --default-item "$__defi" --menu "$__text" "$__h" "$__w" "$__lh" "${__items[@]}"; then
+            if [[ $TUI_OUT =~ ^[0-9]+$ ]] && (( TUI_OUT >= 1 && TUI_OUT <= ${#__vals[@]} )); then
+                printf -v "$__var" '%s' "${__vals[TUI_OUT - 1]}"
+                log "ANSWER: ${__q} => ${__vals[TUI_OUT - 1]}"
+                return 0
+            fi
+        else
+            tui_cancelled
+        fi
+    done
+}
+
+# tui_choose_multi VAR "Question" "value|Label" ...  (entries already in VAR start ticked)
+tui_choose_multi() {
+    local __var=$1 __q=$2
+    shift 2
+    local __cur=" ${!__var:-} " __o __i=0 __st __out="" __t __w __maxl=20 __lh __h __text
+    local -a __vals=() __items=()
+    for __o in "$@"; do
+        __i=$(( __i + 1 ))
+        __vals+=("${__o%%|*}")
+        __st="off"
+        if [[ $__cur = *" ${__o%%|*} "* ]]; then
+            __st="on"
+            __out+="${__out:+ }${__o%%|*}"
+        fi
+        __items+=("$__i" "${__o#*|}" "$__st")
+        if (( ${#__o} > __maxl )); then __maxl=${#__o}; fi
+    done
+    if [ "$TUI_AUTO" = "yes" ]; then
+        printf -v "$__var" '%s' "$__out"
+        log "DEFAULT: ${__q} => ${__out:-none}"
+        return 0
+    fi
+    tui_dims
+    __w=$(( __maxl + 18 ))
+    __w=$(( __w < 60 ? 60 : __w ))
+    __w=$(( __w > TUI_BOXW ? TUI_BOXW : __w ))
+    tui_fit "${__q}"$'\n'"Space ticks or unticks an entry, Enter confirms. Leave all unticked for none." "${#__vals[@]}" "$__w"
+    __text=$TUI_TEXT
+    __lh=$(( TUI_MAXH - TUI_TEXTLINES - 8 ))
+    __lh=$(( __lh > ${#__vals[@]} ? ${#__vals[@]} : __lh ))
+    __lh=$(( __lh < 2 ? 2 : __lh ))
+    __h=$(( TUI_TEXTLINES + __lh + 8 ))
+    __h=$(( __h > TUI_MAXH ? TUI_MAXH : __h ))
+    while true; do
+        if tui_call --separate-output "${TUI_NOTAGS[@]}" --checklist "$__text" "$__h" "$__w" "$__lh" "${__items[@]}"; then
+            __out=""
+            while IFS= read -r __t; do
+                __t=${__t//\"/}
+                if [[ $__t =~ ^[0-9]+$ ]] && (( __t >= 1 && __t <= ${#__vals[@]} )); then
+                    __out+="${__out:+ }${__vals[__t - 1]}"
+                fi
+            done <<<"$TUI_OUT"
+            printf -v "$__var" '%s' "$__out"
+            log "ANSWER: ${__q} => ${__out:-none}"
+            return 0
+        fi
+        tui_cancelled
+    done
+}
+
+# tui_ask VAR "Question" "default" [validator]
+tui_ask() {
+    local __var=$1 __q=$2 __def=${3:-} __check=${4:-} __a __cur __h
+    if [ "$TUI_AUTO" = "yes" ]; then
+        if [ -n "$__def" ] && { [ -z "$__check" ] || "$__check" "$__def"; }; then
+            printf -v "$__var" '%s' "$__def"
+            log "DEFAULT: ${__q} => ${__def}"
+            return 0
+        fi
+        die "Internal error: no usable default for '${__q}'."
+    fi
+    __cur=$__def
+    while true; do
+        tui_dims
+        tui_fit "$__q" 1 "$TUI_BOXW"
+        __h=$(( TUI_TEXTLINES + 8 ))
+        __h=$(( __h > TUI_MAXH ? TUI_MAXH : __h ))
+        if tui_call --inputbox "$TUI_TEXT" "$__h" "$TUI_BOXW" "$__cur"; then
+            __a=$(trim "$TUI_OUT")
+            __cur=$__a
+            if [ -z "$__a" ]; then __a=$__def; fi
+            if [ -z "$__a" ]; then
+                tui_buf_add "An answer is required."
+                continue
+            fi
+            if [ -n "$__check" ] && ! "$__check" "$__a"; then
+                continue
+            fi
+            printf -v "$__var" '%s' "$__a"
+            log "ANSWER: ${__q} => ${__a}"
+            return 0
+        fi
+        tui_cancelled
+    done
+}
+
+# tui_ask_yn VAR "Question" y|n
+tui_ask_yn() {
+    local __var=$1 __q=$2 __def=$3 __h __rc __text
+    local -a __f=()
+    if [ "$TUI_AUTO" = "yes" ]; then
+        if [ "$__def" = "y" ]; then printf -v "$__var" 'yes'; else printf -v "$__var" 'no'; fi
+        log "DEFAULT: ${__q} => ${!__var}"
+        return 0
+    fi
+    if [ "$__def" = "n" ]; then __f=(--defaultno); fi
+    tui_dims
+    tui_fit "$__q" 0 "$TUI_BOXW"
+    __text=$TUI_TEXT
+    __h=$(( TUI_TEXTLINES + 6 ))
+    __h=$(( __h > TUI_MAXH ? TUI_MAXH : __h ))
+    while true; do
+        __rc=0
+        tui_call "${__f[@]}" --yesno "$__text" "$__h" "$TUI_BOXW" || __rc=$?
+        case "$__rc" in
+            0) printf -v "$__var" 'yes'; break ;;
+            1) printf -v "$__var" 'no'; break ;;
+            *)
+                if [ "$TUI_PHASE" = "finish" ]; then
+                    printf -v "$__var" 'no'
+                    break
+                fi
+                tui_cancelled
+                ;;
+        esac
+    done
+    log "ANSWER: ${__q} => ${!__var}"
+}
+
+# tui_ask_password VAR "what" MIN_LENGTH
+tui_ask_password() {
+    local __var=$1 __what=$2 __min=${3:-1} __p1 __p2 __h
+    if [ "$TUI_AUTO" = "yes" ]; then
+        die "Internal error: a password cannot be filled in automatically."
+    fi
+    while true; do
+        tui_dims
+        tui_fit "Type the ${__what}:" 0 "$TUI_BOXW"
+        __h=$(( TUI_TEXTLINES + 8 ))
+        __h=$(( __h > TUI_MAXH ? TUI_MAXH : __h ))
+        if ! tui_call "${TUI_PWOPT[@]}" --passwordbox "$TUI_TEXT" "$__h" "$TUI_BOXW"; then
+            tui_cancelled
+            continue
+        fi
+        __p1=$TUI_OUT
+        if (( ${#__p1} < __min )); then
+            if (( __min == 1 )); then tui_buf_add "It cannot be empty."; else tui_buf_add "It must be at least ${__min} characters long."; fi
+            continue
+        fi
+        if ! tui_call "${TUI_PWOPT[@]}" --passwordbox "Type the ${__what} again to confirm:" 9 "$TUI_BOXW"; then
+            tui_cancelled
+            continue
+        fi
+        __p2=$TUI_OUT
+        TUI_OUT=""
+        if [ "$__p1" != "$__p2" ]; then
+            tui_buf_add "The two entries did not match. Try again."
+            continue
+        fi
+        if (( ${#__p1} < 8 )); then
+            tui_buf_add "That is shorter than 8 characters, which is easy to guess."
+            if ! yesno "Use it anyway?" n; then continue; fi
+        fi
+        printf -v "$__var" '%s' "$__p1"
+        log "ANSWER: ${__what} => (hidden)"
+        return 0
+    done
+}
+
+# Timezone: a region menu and a city menu instead of typing.
+tui_ask_timezone() {
+    local how cur=${TIMEZONE:-UTC} region city names
+    local -a items=()
+    if [ "$TUI_AUTO" = "yes" ]; then
+        TIMEZONE=$cur
+        return 0
+    fi
+    while true; do
+        say "The timezone sets your local time. It is currently set to ${cur}."
+        choose how "Timezone" "keep" \
+            "keep|Keep ${cur}" \
+            "browse|Pick from a list (region, then city)" \
+            "type|Type it (for example America/New_York)"
+        case "$how" in
+            keep)
+                TIMEZONE=$cur
+                return 0 ;;
+            type)
+                ask TIMEZONE "Timezone (Region/City)" "$cur" valid_timezone
+                return 0 ;;
+            browse)
+                names=$(tz_names)
+                items=()
+                while IFS= read -r region; do
+                    items+=("${region}|${region}")
+                done < <(awk -F/ 'NF > 1 {print $1}' <<<"$names" | sort -u)
+                items+=("UTC|UTC (no time zone offset)")
+                choose region "Region" "${cur%%/*}" "${items[@]}"
+                if [ "$region" = "UTC" ]; then
+                    TIMEZONE="UTC"
+                    return 0
+                fi
+                items=()
+                while IFS= read -r city; do
+                    items+=("${region}/${city}|${city//_/ }")
+                done < <(awk -v r="${region}/" 'index($0, r) == 1 {print substr($0, length(r) + 1)}' <<<"$names")
+                choose TIMEZONE "City in ${region}" "$cur" "${items[@]}"
+                return 0 ;;
+        esac
+    done
+}
+
+# The console's 'list' answer to the timezone question; in the menu version
+# the timezone menu has its own list.
+browse_timezones() {
+    if [ "$TUI_ACTIVE" = "yes" ]; then
+        warn "Browsing is done with the 'Pick from a list' option in the timezone menu."
+    else
+        cli_browse_timezones
+    fi
+}
+
+# ----------------------------------------------------------------------------
+# Front-end dispatch: dialogs while TUI_ACTIVE=yes, console output otherwise
+# (during the unattended installation, which prints its progress as text).
+# ----------------------------------------------------------------------------
+say()            { if [ "$TUI_ACTIVE" = "yes" ]; then tui_say "$@"; else cli_say "$@"; fi; }
+say_pre()        { if [ "$TUI_ACTIVE" = "yes" ]; then tui_say_pre "$@"; else cli_say_pre "$@"; fi; }
+section()        { if [ "$TUI_ACTIVE" = "yes" ]; then tui_section "$@"; else cli_section "$@"; fi; }
+subsection()     { if [ "$TUI_ACTIVE" = "yes" ]; then tui_subsection "$@"; else cli_subsection "$@"; fi; }
+info()           { if [ "$TUI_ACTIVE" = "yes" ]; then tui_info "$@"; else cli_info "$@"; fi; }
+ok()             { if [ "$TUI_ACTIVE" = "yes" ]; then tui_info "$@"; else cli_ok "$@"; fi; }
+warn()           { if [ "$TUI_ACTIVE" = "yes" ]; then tui_warn "$@"; else cli_warn "$@"; fi; }
+die()            { if [ "$TUI_ACTIVE" = "yes" ]; then tui_die "$@"; else cli_die "$@"; fi; }
+run()            { if [ "$TUI_ACTIVE" = "yes" ]; then tui_run "$@"; else cli_run "$@"; fi; }
+choose()         { if [ "$TUI_ACTIVE" = "yes" ]; then tui_choose "$@"; else cli_choose "$@"; fi; }
+choose_multi()   { if [ "$TUI_ACTIVE" = "yes" ]; then tui_choose_multi "$@"; else cli_choose_multi "$@"; fi; }
+ask()            { if [ "$TUI_ACTIVE" = "yes" ]; then tui_ask "$@"; else cli_ask "$@"; fi; }
+ask_yn()         { if [ "$TUI_ACTIVE" = "yes" ]; then tui_ask_yn "$@"; else cli_ask_yn "$@"; fi; }
+ask_password()   { if [ "$TUI_ACTIVE" = "yes" ]; then tui_ask_password "$@"; else cli_ask_password "$@"; fi; }
+pause()          { if [ "$TUI_ACTIVE" = "yes" ]; then tui_pause; else cli_pause; fi; }
+handoff_screen() { if [ "$TUI_ACTIVE" = "yes" ]; then tui_handoff_screen; else cli_handoff_screen; fi; }
+ask_timezone()   { if [ "$TUI_ACTIVE" = "yes" ]; then tui_ask_timezone; else cli_ask_timezone; fi; }
+
+ui_install_phase() {
+    TUI_BUF=""
+    TUI_ACTIVE="no"
+    tui_clear
+}
+
+ui_finish_phase() {
+    TUI_ACTIVE="yes"
+    TUI_PHASE="finish"
+    TUI_BUF=""
+}
+
+# ----------------------------------------------------------------------------
+# Sections, defaults and the main menu
+# ----------------------------------------------------------------------------
+tui_dump_state() {
+    local v
+    for v in "${CONFIG_VARS[@]}" ROOT_PASSWORD USER_PASSWORD LUKS_PASSWORD; do
+        declare -p "$v"
+    done | sed 's/^declare /declare -g /'
+}
+
+# Fill every section the user has not opened yet with its recommended settings,
+# by running its questions silently. Re-run after each change, so that these
+# defaults follow earlier choices (for example the desktop decides the init system).
+tui_refresh_defaults() {
+    local key v
+    TUI_AUTO="yes"
+    for key in sys region hw sw; do
+        if [ "${SEC_STATE[$key]:-}" != "set" ]; then
+            # Unquoted on purpose: SEC_VARS holds space separated variable names.
+            for v in ${SEC_VARS[$key]}; do printf -v "$v" '%s' ""; done
+            "${SEC_FN[$key]}"
+            SEC_STATE[$key]="default"
+        fi
+    done
+    TUI_AUTO="no"
+}
+
+# Run one section's questions in a subshell, so that "Back to the main menu"
+# can discard its changes. Answers are handed back through a private temporary
+# file on the live system's RAM-backed /tmp, which is deleted right after.
+tui_run_section() {
+    local key=$1 fn=${SEC_FN[$1]} tmp rc
+    tmp=$(work_file tui-state)
+    chmod 600 -- "$tmp"
+    trap - ERR
+    set +e
+    (
+        set -e
+        trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
+        IN_SECTION="yes"
+        "$fn"
+        tui_pause
+        tui_dump_state >"$tmp"
+    )
+    rc=$?
+    set -e
+    trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
+    case "$rc" in
+        0)
+            load_config "$tmp"
+            rm -f -- "$tmp"
+            SEC_STATE[$key]="set"
+            tui_refresh_defaults
+            return 0 ;;
+        10)
+            rm -f -- "$tmp"
+            log "Section ${key}: changes discarded"
+            return 1 ;;
+        11)
+            rm -f -- "$tmp"
+            tui_quit ;;
+        *)
+            rm -f -- "$tmp"
+            exit "$rc" ;;
+    esac
+}
+
+tui_sec_summary() {
+    local n_fp=0 n_pk=0 a
+    case "$1" in
+        sys) printf '%s\n' "$(de_label "$DE"), ${INIT}, binary packages: ${USE_BINPKG}" ;;
+        disk)
+            if [ "${SEC_STATE[disk]:-}" != "set" ]; then printf '%s\n' "not set yet"; return 0; fi
+            a="whole disk"
+            if [ "$PART_MODE" = "manual" ]; then a="manual"; fi
+            printf '%s\n' "${DISK} (${a}), ${FS}$( [ "$ENCRYPT" = yes ] && printf '%s\n' " + LUKS" ), ${BOOTLOADER}" ;;
+        region) printf '%s\n' "${NEW_HOSTNAME}, ${TIMEZONE}, ${LOCALE}" ;;
+        acct)
+            if [ "${SEC_STATE[acct]:-}" != "set" ]; then printf '%s\n' "not set yet"; return 0; fi
+            printf '%s\n' "${USERNAME} (${PRIV_TOOL}, shell: ${USER_SHELL:-bash})" ;;
+        hw) printf '%s\n' "network: ${NET_TOOL}, graphics: ${GPU_DRIVER}, SSH: ${WANT_SSH}" ;;
+        sw)
+            # Unquoted on purpose: both hold space separated names, split to count them.
+            for a in $FLATPAK_APPS; do n_fp=$(( n_fp + 1 )); done
+            for a in $EXTRA_PKGS; do n_pk=$(( n_pk + 1 )); done
+            printf '%s\n' "Flatpak: ${WANT_FLATPAK} (${n_fp} apps), ${n_pk} native packages" ;;
+    esac
+}
+
+tui_hub_line() {
+    local key=$1 label=$2 mark summary max
+    case "${SEC_STATE[$key]:-}" in
+        set) mark="[done]" ;;
+        default) mark="[default]" ;;
+        *) mark="[required]" ;;
+    esac
+    summary=$(tui_sec_summary "$key")
+    max=$(( TUI_BOXW - 44 ))
+    if (( max > 5 && ${#summary} > max )); then summary="${summary:0:max-3}..."; fi
+    printf '%-20s %-10s %s' "$label" "$mark" "$summary"
+}
+
+tui_validate() {
+    local e gui=0
+    CFG_ERRORS=()
+    CFG_NOTES=()
+    if [ "${SEC_STATE[disk]:-}" != "set" ]; then
+        CFG_ERRORS+=("Disk: choose where to install Gentoo (section 2).")
+    fi
+    if [ "${SEC_STATE[acct]:-}" != "set" ]; then
+        CFG_ERRORS+=("Accounts: set the passwords and create your user (section 4).")
+    fi
+    if [ "${SEC_STATE[disk]:-}" = "set" ] && (( $(target_root_gib) < $(min_root_gib) )); then
+        CFG_ERRORS+=("Disk: $( [ "$PART_MODE" = manual ] && printf '%s\n' "${ROOT_PART}" || printf '%s\n' "${DISK}" ) has $(target_root_gib) GiB, but a desktop installation needs at least ${MIN_DESKTOP_DISK_GIB} GiB (section 2, or choose No desktop in section 1).")
+    fi
+    if [ "${SEC_STATE[disk]:-}" = "set" ] && [ "$ENCRYPT" = "yes" ] && [ -z "$LUKS_PASSWORD" ]; then
+        CFG_ERRORS+=("Disk: encryption is on but no passphrase is set (section 2).")
+    fi
+    if [ "$NET_TOOL" = "networkd" ] && [ "$INIT" != "systemd" ]; then
+        CFG_ERRORS+=("Network: systemd-networkd needs systemd, but OpenRC is selected. Change the network manager (section 5) or the init system (section 1).")
+    fi
+    if [ "$DE" != "none" ] && [ -z "$XKB_LAYOUT" ]; then
+        xkb_from_keymap "$KEYMAP"
+        CFG_NOTES+=("The desktop keyboard layout was set to '${XKB_LAYOUT}' from the console keymap. Change it in section 3 if needed.")
+    fi
+    if [ "$DE" = "none" ]; then
+        if [ "$WANT_FLATPAK" = "yes" ]; then
+            CFG_NOTES+=("Flatpak is selected although there is no desktop; Flatpak apps are mostly graphical (section 6).")
+        fi
+        if [ "$WANT_CUPS" = "yes" ]; then
+            CFG_NOTES+=("Printing (CUPS) is selected although there is no desktop (section 5).")
+        fi
+        for e in "${NATIVE_GUI_APPS[@]}"; do
+            if [[ " $EXTRA_PKGS " = *" ${e%%|*} "* ]]; then gui=$(( gui + 1 )); fi
+        done
+        if (( gui > 0 )); then
+            CFG_NOTES+=("${gui} graphical application(s) are selected although there is no desktop (section 6).")
+        fi
+    fi
+    if [ "$HAS_WIFI" = "yes" ] && [ "$NET_TOOL" != "networkmanager" ]; then
+        CFG_NOTES+=("This machine has Wi-Fi, but ${NET_TOOL} only sets up wired networking (section 5).")
+    fi
+}
+
+tui_review() {
+    local tmp C_RED="" C_RESET="" C_BOLD=""
+    tui_validate
+    compute_derived
+    tmp=$(work_file review)
+    {
+        print_summary
+        if (( ${#CFG_ERRORS[@]} > 0 )); then
+            printf '\n  Must be fixed before installing:\n'
+            printf -- '    - %s\n' "${CFG_ERRORS[@]}"
+        fi
+        if (( ${#CFG_NOTES[@]} > 0 )); then
+            printf '\n  Notes:\n'
+            printf -- '    - %s\n' "${CFG_NOTES[@]}"
+        fi
+    } | fold -s -w $(( TUI_BOXW - 4 )) >"$tmp"
+    TUI_TITLE="Review all settings"
+    tui_dims
+    tui_call "${TUI_SCROLL[@]}" --textbox "$tmp" "$TUI_MAXH" "$TUI_BOXW" || true
+    rm -f -- "$tmp"
+}
+
+tui_install_confirm() {
+    local word="ERASE" what
+    tui_validate
+    if (( ${#CFG_ERRORS[@]} > 0 )); then
+        TUI_TITLE="Not ready yet"
+        tui_show "These must be done before installing:"$'\n\n'"$(printf -- '- %s\n' "${CFG_ERRORS[@]}")"
+        return 1
+    fi
+    tui_review
+    if [ "$PART_MODE" = "auto" ]; then
+        what="EVERY partition and file on ${DISK} will be permanently deleted."
+    else
+        word="FORMAT"
+        what="The partitions marked WILL BE FORMATTED in the summary will be erased."
+    fi
+    TUI_TITLE="Start the installation"
+    if ! yesno "Install Gentoo with these settings now? ${what}" n; then
+        return 1
+    fi
+    tui_dims
+    if ! tui_call --inputbox "Last check. ${what}"$'\n\n'"Type ${word} in capital letters to start:" 11 "$TUI_BOXW" ""; then
+        return 1
+    fi
+    if [ "$(trim "$TUI_OUT")" != "$word" ]; then
+        tui_show "Not confirmed. Nothing was changed."
+        return 1
+    fi
+    return 0
+}
+
+tui_next_item() {
+    case "$1" in
+        sys) printf '%s\n' "disk" ;;
+        disk) printf '%s\n' "region" ;;
+        region) printf '%s\n' "acct" ;;
+        acct) printf '%s\n' "hw" ;;
+        hw) printf '%s\n' "sw" ;;
+        *) printf '%s\n' "review" ;;
+    esac
+}
+
+tui_hub() {
+    local def="guided" key choice text lh h
+    local -a items=()
+    while true; do
+        TUI_TITLE="Main menu"
+        TUI_BUF=""
+        tui_dims
+        items=(
+            guided  "Guided setup: go through every section in order"
+            sys     "$(tui_hub_line sys "1. System")"
+            disk    "$(tui_hub_line disk "2. Disk")"
+            region  "$(tui_hub_line region "3. Region")"
+            acct    "$(tui_hub_line acct "4. Accounts")"
+            hw      "$(tui_hub_line hw "5. Drivers & network")"
+            sw      "$(tui_hub_line sw "6. Software")"
+            review  "Review all settings"
+            install "Install Gentoo"
+            quit    "Quit without installing"
+        )
+        text="Pick a section to set up or change. [default] sections already hold the recommended settings; [required] ones must be done before installing. Nothing on disk changes until you choose Install and confirm."
+        lh=10
+        h=$(( $(tui_lines "$text" $(( TUI_BOXW - 4 ))) + lh + 8 ))
+        h=$(( h > TUI_MAXH ? TUI_MAXH : h ))
+        lh=$(( h - $(tui_lines "$text" $(( TUI_BOXW - 4 ))) - 8 ))
+        lh=$(( lh < 3 ? 3 : lh ))
+        if ! tui_call "${TUI_NOTAGS[@]}" --default-item "$def" --menu "$text" "$h" "$TUI_BOXW" "$lh" "${items[@]}"; then
+            if yesno "Quit the installer? Nothing on disk has been changed." n; then tui_quit; fi
+            continue
+        fi
+        choice=$TUI_OUT
+        case "$choice" in
+            guided)
+                for key in "${SEC_ORDER[@]}"; do
+                    if ! tui_run_section "$key"; then break; fi
+                done
+                def="review" ;;
+            sys|disk|region|acct|hw|sw)
+                if tui_run_section "$choice"; then def=$(tui_next_item "$choice"); else def=$choice; fi ;;
+            review)
+                tui_review
+                def="install" ;;
+            install)
+                if tui_install_confirm; then return 0; fi
+                def="install" ;;
+            quit)
+                if yesno "Quit without installing? Nothing on disk has been changed." n; then tui_quit; fi ;;
+        esac
+    done
+}
+
+tui_welcome() {
+    TUI_TITLE="Welcome"
+    tui_show "This installs Gentoo Linux on this computer, following the official Gentoo AMD64 Handbook.
+
+How it works:
+  1. It checks your network connection and detects your hardware.
+  2. A main menu lets you set up each part of the system. Most parts start out filled in with recommended settings; only the disk and your user account have to be set by you.
+  3. Nothing on disk is changed until you pick Install and type a confirmation word. (In manual partitioning mode you can edit partitions yourself with cfdisk along the way.)
+  4. The installation then runs on its own and shows its progress as text. It can take from under an hour to many hours, depending on your hardware and choices.
+
+Keys: arrow keys and Tab move, Space ticks a checkbox, Enter confirms, Esc goes back or offers to quit.
+
+Log file: ${LOG}"
+}
+
+tui_install() {
+    compute_derived
+    ui_install_phase
+    resolve_stage3
+    prepare_disk
+    install_stage3
+    mount_pseudo
+    hash_passwords
+    write_target_config
+    run_chroot_stage
+    ui_finish_phase
+    finish_install
+    tui_pause
+    tui_clear
+    TUI_ACTIVE="no"
+}
+
+tui_fresh_install() {
+    live_preflight
+    : >"$LOG"
+    log "gentoo_install_tui.sh ${SCRIPT_VERSION} started"
+    init_defaults
+    tui_init
+    TUI_ACTIVE="yes"
+    tui_welcome
+    live_keyboard
+    detect_hardware
+    network_step
+    sync_clock
+    show_hardware
+    mac_boot_check
+    tui_refresh_defaults
+    tui_hub
+    tui_install
+}
+
+# ----------------------------------------------------------------------------
+# Entry point (menu version)
 # ----------------------------------------------------------------------------
 main() {
-    case "${1:-}" in
-        -h|--help)
-            usage
-            return 0
-            ;;
-    esac
-    if [[ ! -t 0 ]]; then
-        echo "This installer is interactive and needs a keyboard on standard input." >&2
-        echo "Download it first, then run it:" >&2
-        echo "  curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo-install.sh" >&2
-        echo "  bash gentoo-install.sh" >&2
+    check_bash_version
+    parse_args "$@"
+    if [ "$RUN_MODE" = "help" ]; then
+        usage
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        printf '%s\n' "This installer is interactive and needs a keyboard on standard input." \
+            "Download it first, then run it:" \
+            "  curl -fsSLO https://raw.githubusercontent.com/NullAngst/Gentoo-Installer/refs/heads/main/gentoo_install_tui.sh" \
+            "  bash gentoo_install_tui.sh" >&2
         exit 1
     fi
-    SELF=$(readlink -f "${BASH_SOURCE[0]}")
+    SELF=$(self_path)
+    make_work_dir
+    trap remove_work_dir EXIT
     trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
     trap on_interrupt INT
-    case "${1:-}" in
-        --chroot-stage)
+    case "$RUN_MODE" in
+        chroot)
             chroot_stage
             ;;
-        --resume)
+        resume)
             live_preflight
             init_defaults
-            log "gentoo-install.sh ${SCRIPT_VERSION} resuming"
+            log "gentoo_install_tui.sh ${SCRIPT_VERSION} resuming"
+            tui_init
+            TUI_ACTIVE="yes"
             detect_hardware
             resume_install
-            ;;
-        "")
-            fresh_install
+            tui_pause
+            tui_clear
+            TUI_ACTIVE="no"
             ;;
         *)
-            usage
-            die "Unknown option: $1"
+            tui_fresh_install
             ;;
     esac
 }
 
 # Run main unless the file is being sourced (for example by a test harness).
-if [[ "${BASH_SOURCE[0]:-}" == "$0" || -z "${BASH_SOURCE[0]:-}" ]]; then
+if [ "${BASH_SOURCE[0]:-}" = "$0" ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
     main "$@"
 fi

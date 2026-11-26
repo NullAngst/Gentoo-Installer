@@ -1,78 +1,116 @@
 #!/usr/bin/env bash
 # Builds the two single-file installers from the shared sources in src/.
 #
-#   gentoo-install.sh       console front end
-#   gentoo-install-tui.sh   dialog/whiptail front end (same questions and engine)
+#   gentoo_install.sh       console front end
+#   gentoo_install_tui.sh   dialog/whiptail front end (same questions and engine)
 #
-# Both embed gentoo-helper.sh, which is also published on its own.
+# Both embed gentoo_helper.sh, which is also published on its own.
 #
-# Edit files in src/, then run ./build.sh and commit the results. Both installers
+# Edit files in src/, then run this and commit the results. Both installers
 # must stay single files so they can be downloaded with one curl command.
 #
-#   ./build.sh           build both files
-#   ./build.sh --check   fail if the committed files differ from a fresh build
-#   ./build.sh --lint    run ShellCheck on both built files
+#   bash build.sh        build both files
+#   bash build.sh -c     check: fail if the committed files differ from a fresh build
+#   bash build.sh -l     lint: run ShellCheck on both built files and the helper
+#   bash build.sh -h     this help
 set -euo pipefail
-cd "$(dirname "$0")"
 
-# gentoo-helper.sh (the package manager helper) is embedded into both installers,
-# which write it to /usr/local/bin/gentoo-helper on the new system.
+usage() {
+    printf '%s\n' "Usage: bash build.sh [-c | -l | -h]" \
+        "  (no option)  build gentoo_install.sh and gentoo_install_tui.sh from src/" \
+        "  -c           check that the committed installers match a fresh build" \
+        "  -l           run ShellCheck on the installers and gentoo_helper.sh" \
+        "  -h           show this help"
+}
+
+mode="build"
+while getopts ':clh' opt; do
+    case "$opt" in
+        c) mode="check" ;;
+        l) mode="lint" ;;
+        h) usage; exit 0 ;;
+        *) usage >&2; exit 1 ;;
+    esac
+done
+shift $(( OPTIND - 1 ))
+
+required=(cat grep mktemp cmp wc chmod mv rm)
+if [ "$mode" = "lint" ]; then required+=(shellcheck); fi
+missing=()
+for c in "${required[@]}"; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+    printf 'build.sh: missing commands: %s\n' "${missing[*]}" >&2
+    exit 1
+fi
+
+cd -- "$(dirname -- "$0")" || exit 1
+
+if [ "$mode" = "lint" ]; then
+    shellcheck -s bash -S style gentoo_install.sh
+    shellcheck -s bash -S style gentoo_install_tui.sh
+    shellcheck -s bash -S style gentoo_helper.sh
+    shellcheck -s bash -S style build.sh
+    printf '%s\n' "ShellCheck: no findings."
+    exit 0
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/gentoo_build.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+# gentoo_helper.sh (the package manager helper) is embedded into both
+# installers, which write it to /usr/local/bin/gentoo_helper on the new system.
 readonly HELPER_EOF="GENTOO_HELPER_SCRIPT_EOF"
-embed=$(mktemp)
-trap 'rm -f "$embed"' EXIT
-if grep -qx "$HELPER_EOF" gentoo-helper.sh; then
-    echo "gentoo-helper.sh contains the line ${HELPER_EOF}; cannot embed it." >&2
+embed="$work/embed.sh"
+if grep -qx "$HELPER_EOF" gentoo_helper.sh; then
+    printf 'gentoo_helper.sh contains the line %s; cannot embed it.\n' "$HELPER_EOF" >&2
     exit 1
 fi
 {
-    echo ""
-    echo "# ----------------------------------------------------------------------------"
-    echo "# gentoo-helper, embedded by build.sh from gentoo-helper.sh (do not edit here)"
-    echo "# ----------------------------------------------------------------------------"
-    echo "install_gentoo_helper() {"
-    echo "    mkdir -p /usr/local/bin"
-    echo "    cat >/usr/local/bin/gentoo-helper <<'${HELPER_EOF}'"
-    cat gentoo-helper.sh
-    echo "${HELPER_EOF}"
-    echo "    chmod 755 /usr/local/bin/gentoo-helper"
-    echo "}"
+    printf '\n'
+    printf '%s\n' "# ----------------------------------------------------------------------------" \
+        "# gentoo_helper, embedded by build.sh from gentoo_helper.sh (do not edit here)" \
+        "# ----------------------------------------------------------------------------" \
+        "install_gentoo_helper() {" \
+        "    mkdir -p /usr/local/bin" \
+        "    cat >/usr/local/bin/gentoo_helper <<'${HELPER_EOF}'"
+    cat gentoo_helper.sh
+    printf '%s\n' "${HELPER_EOF}" \
+        "    chmod 755 /usr/local/bin/gentoo_helper" \
+        "}"
 } >"$embed"
 
-shared=(src/10-core.sh src/20-detect.sh src/30-questions.sh src/40-install.sh src/50-chroot.sh "$embed")
-cli=("${shared[@]}" src/90-main-cli.sh)
-tui=("${shared[@]}" src/60-tui.sh src/91-main-tui.sh)
+shared=(src/10_core.sh src/20_detect.sh src/30_questions.sh src/40_install.sh src/50_chroot.sh "$embed")
+cli=("${shared[@]}" src/90_main_cli.sh)
+tui=("${shared[@]}" src/60_tui.sh src/91_main_tui.sh)
 
+# build OUTPUT PART...: concatenate the parts, syntax check, then replace OUTPUT.
 build() {
     local out=$1
     shift
-    cat "$@" >"$out.tmp"
-    bash -n "$out.tmp"
-    chmod 755 "$out.tmp"
-    mv "$out.tmp" "$out"
+    cat -- "$@" >"$work/out"
+    bash -n "$work/out"
+    chmod 755 -- "$work/out"
+    mv -f -- "$work/out" "$out"
 }
 
-if [[ ${1:-} == "--lint" ]]; then
-    # SC2329 is excluded for the TUI build only: the TUI replaces the console
-    # prompt functions with wrappers, and ShellCheck cannot see that the
-    # originals are still called through their cli_* copies (made with eval).
-    shellcheck -s bash -S style gentoo-install.sh
-    shellcheck -s bash -S style -e SC2329 gentoo-install-tui.sh
-    shellcheck -s bash -S style gentoo-helper.sh
-    echo "ShellCheck: no findings."
+if [ "$mode" = "check" ]; then
+    cat -- "${cli[@]}" >"$work/cli"
+    cat -- "${tui[@]}" >"$work/tui"
+    if ! cmp -s "$work/cli" gentoo_install.sh; then
+        printf '%s\n' "gentoo_install.sh is out of date: run bash build.sh" >&2
+        exit 1
+    fi
+    if ! cmp -s "$work/tui" gentoo_install_tui.sh; then
+        printf '%s\n' "gentoo_install_tui.sh is out of date: run bash build.sh" >&2
+        exit 1
+    fi
+    printf '%s\n' "Both installers match src/."
     exit 0
 fi
 
-if [[ ${1:-} == "--check" ]]; then
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp" "$embed"' EXIT
-    cat "${cli[@]}" >"$tmp/cli"
-    cat "${tui[@]}" >"$tmp/tui"
-    cmp -s "$tmp/cli" gentoo-install.sh || { echo "gentoo-install.sh is out of date: run ./build.sh" >&2; exit 1; }
-    cmp -s "$tmp/tui" gentoo-install-tui.sh || { echo "gentoo-install-tui.sh is out of date: run ./build.sh" >&2; exit 1; }
-    echo "Both installers match src/."
-    exit 0
-fi
-
-build gentoo-install.sh "${cli[@]}"
-build gentoo-install-tui.sh "${tui[@]}"
-echo "Built gentoo-install.sh ($(wc -l <gentoo-install.sh) lines) and gentoo-install-tui.sh ($(wc -l <gentoo-install-tui.sh) lines)."
+build gentoo_install.sh "${cli[@]}"
+build gentoo_install_tui.sh "${tui[@]}"
+printf 'Built gentoo_install.sh (%s lines) and gentoo_install_tui.sh (%s lines).\n' \
+    "$(wc -l <gentoo_install.sh)" "$(wc -l <gentoo_install_tui.sh)"

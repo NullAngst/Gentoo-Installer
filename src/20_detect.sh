@@ -29,41 +29,73 @@ have_internet() {
 # ----------------------------------------------------------------------------
 # Live environment checks
 # ----------------------------------------------------------------------------
-usage() {
-    cat <<EOF
-gentoo-install.sh ${SCRIPT_VERSION}: guided Gentoo Linux installer for amd64
-
-Usage:
-  bash gentoo-install.sh            Start a new installation
-  bash gentoo-install.sh --resume   Continue after fixing a failed step
-  bash gentoo-install.sh --help     Show this help
-
-Run it as root from the official Gentoo live image (minimal or LiveGUI).
-Download it first, then run it. Piping it into bash does not work because
-the installer reads your answers from the keyboard.
-EOF
+# parse_args ARGS...: sets RUN_MODE to fresh, resume, chroot or help. Long
+# options are translated to their short forms, then read with getopts.
+RUN_MODE="fresh"
+parse_args() {
+    local arg opt
+    local -a args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --help) args+=(-h) ;;
+            --resume) args+=(-r) ;;
+            --chroot-stage) args+=(-C) ;;
+            --*) usage >&2; printf 'Unknown option: %s\n' "$arg" >&2; exit 1 ;;
+            *) args+=("$arg") ;;
+        esac
+    done
+    set -- "${args[@]}"
+    OPTIND=1
+    while getopts ':hrC' opt; do
+        case "$opt" in
+            h) RUN_MODE="help" ;;
+            r) RUN_MODE="resume" ;;
+            C) RUN_MODE="chroot" ;;
+            *) usage >&2; printf 'Unknown option: -%s\n' "$OPTARG" >&2; exit 1 ;;
+        esac
+    done
+    shift $(( OPTIND - 1 ))
+    if [ "$#" -gt 0 ]; then
+        usage >&2
+        printf 'Unexpected argument: %s\n' "$1" >&2
+        exit 1
+    fi
 }
 
+# The bash version check runs before anything that needs bash 4.4 features.
+check_bash_version() {
+    if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+        printf '%s\n' "This installer needs bash 4.4 or newer (this is bash ${BASH_VERSION})." >&2
+        exit 1
+    fi
+}
+
+# Tools the live side needs. Missing ones are listed together, then the
+# installer stops before anything is changed.
+LIVE_TOOLS=(
+    lsblk blkid wipefs sfdisk partprobe blockdev mkfs.ext4 mkfs.vfat mkswap
+    mount umount mountpoint findmnt chroot tar xz sha256sum awk sed grep fold
+    cut tr sort head tail od df find mktemp install cat cp rm mkdir chmod
+    udevadm timeout date
+)
+
 live_preflight() {
-    if [[ $EUID -ne 0 ]]; then
-        die "Please run as root. On the LiveGUI image use: sudo bash gentoo-install.sh"
+    if [ "$(id -u)" -ne 0 ]; then
+        die "Please run as root. On the LiveGUI image use: sudo bash ${SELF##*/}"
     fi
-    if [[ $(uname -m) != "x86_64" ]]; then
+    if [ "$(uname -m)" != "x86_64" ]; then
         die "This installer supports amd64 (x86_64) only. This machine reports: $(uname -m)."
-    fi
-    if (( BASH_VERSINFO[0] < 5 )); then
-        die "Bash 5 or newer is required."
     fi
     local -a missing=()
     local t
-    for t in lsblk blkid wipefs sfdisk mkfs.ext4 mkswap mount umount mountpoint findmnt chroot tar xz sha256sum awk sed grep fold udevadm; do
+    for t in "${LIVE_TOOLS[@]}"; do
         have "$t" || missing+=("$t")
     done
     if ! have curl && ! have wget; then missing+=("curl or wget"); fi
-    if (( ${#missing[@]} > 0 )); then
+    if [ "${#missing[@]}" -gt 0 ]; then
         die "Missing tools on this live system: ${missing[*]}. Please use the official Gentoo minimal or LiveGUI image."
     fi
-    mkdir -p "$MNT"
+    mkdir -p -- "$MNT"
 }
 
 welcome() {
@@ -92,16 +124,19 @@ live_keyboard() {
 list_interfaces() {
     local n
     for n in /sys/class/net/*; do
-        [[ -e $n ]] || continue
+        [ -e "$n" ] || continue
         n=${n##*/}
-        [[ $n == "lo" ]] && continue
-        echo "$n"
+        [ "$n" = "lo" ] && continue
+        printf '%s\n' "$n"
     done
 }
 
 network_step() {
     section "Network connection"
     say "The installer downloads the Gentoo base system and all packages from the internet, so a working connection is required. Wired Ethernet usually works automatically."
+    if [ "$BCM_WIFI" = "wl" ]; then
+        say "This computer's Broadcom Wi-Fi card needs Broadcom's own 'wl' driver, which the live system does not have, so Wi-Fi cannot work here. Use a wired connection, a USB Ethernet adapter, a USB Wi-Fi adapter, or USB tethering from a phone for the installation. The new system can get the wl driver (Part 5 asks)."
+    fi
     local action iface
     while ! have_internet; do
         warn "No working internet connection was detected (could not reach ${DIST_BASE})."
@@ -115,8 +150,8 @@ network_step() {
         case "$action" in
             netsetup)
                 local -a ifopts=()
-                while read -r iface; do ifopts+=("${iface}|${iface}"); done < <(list_interfaces)
-                if (( ${#ifopts[@]} == 0 )); then warn "No network interfaces found."; continue; fi
+                while IFS= read -r iface; do ifopts+=("${iface}|${iface}"); done < <(list_interfaces)
+                if [ "${#ifopts[@]}" -eq 0 ]; then warn "No network interfaces found."; continue; fi
                 choose iface "Which network interface?" "${ifopts[0]%%|*}" "${ifopts[@]}"
                 handoff_screen
                 net-setup "$iface" || true ;;
@@ -142,20 +177,20 @@ sync_clock() {
             synced="yes"
         fi
     fi
-    if [[ $synced == "no" ]] && have ntpd; then
+    if [ "$synced" = "no" ] && have ntpd; then
         if timeout 60 ntpd -q -g -n -p pool.ntp.org >>"$LOG" 2>&1 || timeout 60 ntpd -q -n -p pool.ntp.org >>"$LOG" 2>&1; then
             synced="yes"
         fi
     fi
-    if [[ $synced == "yes" ]]; then
+    if [ "$synced" = "yes" ]; then
         ok "Clock set: $(date -u '+%Y-%m-%d %H:%M UTC')"
     else
         warn "Could not sync the clock automatically. Current time: $(date -u '+%Y-%m-%d %H:%M UTC')"
     fi
-    if (( $(date +%Y) < 2026 )); then
+    if [ "$(date +%Y)" -lt 2026 ]; then
         warn "The system date looks wrong. Downloads and signature checks can fail."
         local d
-        ask d "Enter the current UTC date and time as MMDDhhmmYYYY (example: 092514302026)" "" 
+        ask d "Enter the current UTC date and time as MMDDhhmmYYYY (example: 092514302026)" ""
         if [[ $d =~ ^[0-9]{12}$ ]]; then
             run date -u "$d" || warn "Could not set the date."
         else
@@ -179,54 +214,108 @@ sync_clock() {
 # and warns if it needs a different branch.
 nvidia_generation() {
     local id
-    if [[ ! $1 =~ ^0x[0-9a-fA-F]+$ ]]; then echo "current"; return 0; fi
+    if [[ ! $1 =~ ^0x[0-9a-fA-F]+$ ]]; then printf '%s\n' "current"; return 0; fi
     id=$(( $1 ))
-    if (( id >= 0x1e00 )); then echo "current"
-    elif (( id >= 0x1340 )); then echo "legacy580"
-    else echo "unsupported"; fi
+    if (( id >= 0x1e00 )); then printf '%s\n' "current"
+    elif (( id >= 0x1340 )); then printf '%s\n' "legacy580"
+    else printf '%s\n' "unsupported"; fi
+}
+
+# broadcom_wifi_kind DEVICE_ID: which driver a Broadcom Wi-Fi chip needs.
+#   wl    only Broadcom's proprietary wl driver (net-wireless/broadcom-sta):
+#         BCM4360 (most Macs from 2013 on), BCM4352, BCM43142, BCM43228
+#   b43   the in-kernel b43 driver plus firmware (sys-firmware/b43-firmware):
+#         BCM4311, 4312, 4315, 4318, 4319, 4321, 4322, 4331 (Macs up to 2012)
+#   (empty) supported by brcmsmac or brcmfmac with linux-firmware, or unknown
+broadcom_wifi_kind() {
+    case "$1" in
+        0x43a0|0x43b1|0x4365|0x4359) printf '%s\n' "wl" ;;
+        0x4311|0x4312|0x4315|0x4318|0x4319|0x4328|0x4329|0x432a|0x432b|0x432c|0x432d|0x4331)
+            printf '%s\n' "b43" ;;
+        *) ;;
+    esac
 }
 
 detect_gpus() {
-    HAS_NVIDIA="no"; HAS_AMD="no"; HAS_INTEL="no"; GPU_VM=""; NVIDIA_GEN=""
+    HAS_NVIDIA="no"; HAS_AMD="no"; HAS_INTEL="no"; GPU_VM=""; NVIDIA_GEN=""; HYBRID_GPU="no"
     GPU_NAMES=()
-    local d class vendor slot name gen
+    local d class vendor slot name gen count=0
     for d in /sys/bus/pci/devices/*; do
-        [[ -r $d/class && -r $d/vendor ]] || continue
+        [ -r "$d/class" ] && [ -r "$d/vendor" ] || continue
         class=$(<"$d/class")
-        [[ $class == 0x03* ]] || continue
+        [[ $class = 0x03* ]] || continue
         vendor=$(<"$d/vendor")
         slot=${d##*/}
         case "$vendor" in
             0x10de)
                 HAS_NVIDIA="yes"
-                gen=$(nvidia_generation "$(cat "$d/device" 2>/dev/null)")
+                count=$(( count + 1 ))
+                gen=$(nvidia_generation "$(cat -- "$d/device" 2>/dev/null)")
                 # With several NVIDIA cards, the oldest one decides.
                 case "${NVIDIA_GEN}:${gen}" in
                     :*|current:legacy580|current:unsupported|legacy580:unsupported) NVIDIA_GEN=$gen ;;
                 esac ;;
-            0x1002) HAS_AMD="yes" ;;
-            0x8086) HAS_INTEL="yes" ;;
-            0x15ad|0x80ee) [[ $GPU_VM == *vmware* ]] || GPU_VM+=" vmware" ;;
-            0x1af4) [[ $GPU_VM == *virgl* ]] || GPU_VM+=" virgl" ;;
-            0x1b36) [[ $GPU_VM == *qxl* ]] || GPU_VM+=" qxl" ;;
+            0x1002) HAS_AMD="yes"; count=$(( count + 1 )) ;;
+            0x8086) HAS_INTEL="yes"; count=$(( count + 1 )) ;;
+            0x15ad|0x80ee) [[ $GPU_VM = *vmware* ]] || GPU_VM+=" vmware" ;;
+            0x1af4) [[ $GPU_VM = *virgl* ]] || GPU_VM+=" virgl" ;;
+            0x1b36) [[ $GPU_VM = *qxl* ]] || GPU_VM+=" qxl" ;;
         esac
         name=""
         if have lspci; then
-            name=$(lspci -s "$slot" 2>/dev/null | cut -d' ' -f2- || true)
+            name=$(LC_ALL=C lspci -s "$slot" 2>/dev/null | cut -d' ' -f2- || true)
         fi
         GPU_NAMES+=("${name:-PCI ${slot} vendor ${vendor}}")
     done
     GPU_VM=$(trim "$GPU_VM")
+    # Two real graphics chips (an integrated one plus a dedicated one, as in
+    # many laptops): the desktop can offer to start programs on either.
+    if [ "$count" -ge 2 ]; then HYBRID_GPU="yes"; fi
+}
+
+# Broadcom Wi-Fi chips that need extra drivers or firmware (sets BCM_WIFI).
+detect_broadcom_wifi() {
+    local d kind
+    BCM_WIFI=""
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/class" ] && [ -r "$d/vendor" ] || continue
+        [[ $(<"$d/class") = 0x0280* ]] || continue
+        [ "$(<"$d/vendor")" = "0x14e4" ] || continue
+        kind=$(broadcom_wifi_kind "$(cat -- "$d/device" 2>/dev/null)")
+        if [ -n "$kind" ]; then BCM_WIFI=$kind; fi
+    done
+}
+
+# Apple T2 security chip (Macs from 2018 to 2020): PCI 106b:1801 or 106b:1802.
+has_apple_t2() {
+    local d dev
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/vendor" ] || continue
+        [ "$(<"$d/vendor")" = "0x106b" ] || continue
+        dev=$(cat -- "$d/device" 2>/dev/null || true)
+        case "$dev" in 0x1801|0x1802) return 0 ;; esac
+    done
+    return 1
+}
+
+# A RAID controller in "RAID" or Intel RST/VMD mode hides the disks behind it.
+has_raid_controller() {
+    local d
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/class" ] || continue
+        case "$(<"$d/class")" in 0x0104*) return 0 ;; esac
+    done
+    return 1
 }
 
 detect_hardware() {
     CPU_VENDOR=$(awk -F': *' '/^vendor_id/ {print $2; exit}' /proc/cpuinfo)
     CPU_MODEL=$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo)
-    NPROC=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo)
+    NPROC=$(getconf _NPROCESSORS_ONLN 2>/dev/null || grep -c '^processor' /proc/cpuinfo)
     local mem_kib
     mem_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
     RAM_GIB=$(( (mem_kib + 524288) / 1048576 ))
-    if (( RAM_GIB < 1 )); then RAM_GIB=1; fi
+    if [ "$RAM_GIB" -lt 1 ]; then RAM_GIB=1; fi
 
     local flags f
     flags=" $(awk -F': *' '/^flags/ {print $2; exit}' /proc/cpuinfo) "
@@ -235,16 +324,17 @@ detect_hardware() {
         if [[ $flags != *" $f "* ]]; then CPU_X86_64_V3="no"; fi
     done
 
-    if [[ -d /sys/firmware/efi ]]; then BOOT_MODE="uefi"; else BOOT_MODE="bios"; fi
+    if [ -d /sys/firmware/efi ]; then BOOT_MODE="uefi"; else BOOT_MODE="bios"; fi
     UEFI_BITS=""
-    if [[ -r /sys/firmware/efi/fw_platform_size ]]; then UEFI_BITS=$(</sys/firmware/efi/fw_platform_size); fi
+    if [ -r /sys/firmware/efi/fw_platform_size ]; then UEFI_BITS=$(</sys/firmware/efi/fw_platform_size); fi
+    if [ "$BOOT_MODE" = "uefi" ] && [ -z "$UEFI_BITS" ]; then UEFI_BITS="64"; fi
 
     SECURE_BOOT="off"
     local sb val
     for sb in /sys/firmware/efi/efivars/SecureBoot-*; do
-        [[ -r $sb ]] || continue
+        [ -r "$sb" ] || continue
         val=$(od -An -t u1 "$sb" 2>/dev/null | awk '{print $NF}')
-        if [[ $val == "1" ]]; then SECURE_BOOT="on"; fi
+        if [ "$val" = "1" ]; then SECURE_BOOT="on"; fi
     done
 
     VIRT="none"
@@ -258,53 +348,68 @@ detect_hardware() {
         *Microsoft*"Virtual Machine"*) VIRT="hyperv" ;;
         *Xen*) VIRT="xen" ;;
     esac
-    if [[ $VIRT == "none" && $flags == *" hypervisor "* ]]; then VIRT="other"; fi
+    if [ "$VIRT" = "none" ] && [[ $flags = *" hypervisor "* ]]; then VIRT="other"; fi
 
-    IS_APPLE="no"; MAC_MODEL=""
-    if [[ $vendor == *Apple* ]]; then IS_APPLE="yes"; MAC_MODEL=$(trim "$product"); fi
+    IS_APPLE="no"; MAC_MODEL=""; HAS_T2="no"
+    if [[ $vendor = *Apple* ]]; then
+        IS_APPLE="yes"
+        MAC_MODEL=$(trim "$product")
+        if has_apple_t2; then HAS_T2="yes"; fi
+    fi
     LIVE_BOOT_MODE=$BOOT_MODE
 
     IS_LAPTOP="no"
     if compgen -G "/sys/class/power_supply/BAT*" >/dev/null; then IS_LAPTOP="yes"; fi
-    case "$(cat /sys/class/dmi/id/chassis_type 2>/dev/null || echo 0)" in
+    case "$(cat /sys/class/dmi/id/chassis_type 2>/dev/null || printf '0')" in
         8|9|10|11|14|30|31|32) IS_LAPTOP="yes" ;;
     esac
+    if [[ $MAC_MODEL = MacBook* ]]; then IS_LAPTOP="yes"; fi
+    if [ "$VIRT" != "none" ]; then IS_LAPTOP="no"; fi
 
     HAS_WIFI="no"
     local n
     for n in /sys/class/net/*; do
-        if [[ -d $n/wireless || -e $n/phy80211 ]]; then HAS_WIFI="yes"; fi
+        if [ -d "$n/wireless" ] || [ -e "$n/phy80211" ]; then HAS_WIFI="yes"; fi
     done
+    detect_broadcom_wifi
+    # A Broadcom card that needs the wl driver has no network interface on the
+    # live system, but the new system can drive it.
+    if [ -n "$BCM_WIFI" ]; then HAS_WIFI="yes"; fi
 
     HAS_BT="no"
     if compgen -G "/sys/class/bluetooth/hci*" >/dev/null; then HAS_BT="yes"; fi
 
     detect_gpus
+    if [ "$VIRT" != "none" ]; then HYBRID_GPU="no"; fi
 }
 
 show_hardware() {
     section "Detected hardware"
     local b="" g fw vm
     fw="Legacy BIOS"
-    if [[ $BOOT_MODE == "uefi" ]]; then fw="UEFI (${UEFI_BITS:-64}-bit)"; fi
+    if [ "$BOOT_MODE" = "uefi" ]; then fw="UEFI (${UEFI_BITS:-64}-bit)"; fi
     vm="no (real hardware)"
-    if [[ $VIRT != "none" ]]; then vm="yes ($VIRT)"; fi
+    if [ "$VIRT" != "none" ]; then vm="yes ($VIRT)"; fi
     printf -v b '%s  %-22s %s\n' "$b" "CPU:" "${CPU_MODEL:-unknown} (${CPU_VENDOR:-unknown})"
     printf -v b '%s  %-22s %s\n' "$b" "CPU threads:" "$NPROC"
     printf -v b '%s  %-22s %s\n' "$b" "Memory:" "about ${RAM_GIB} GiB"
     printf -v b '%s  %-22s %s\n' "$b" "x86-64-v3 capable:" "$CPU_X86_64_V3 (AVX2 generation or newer)"
     printf -v b '%s  %-22s %s\n' "$b" "Firmware boot mode:" "$fw"
-    if [[ $BOOT_MODE == "uefi" ]]; then
+    if [ "$BOOT_MODE" = "uefi" ]; then
         printf -v b '%s  %-22s %s\n' "$b" "Secure Boot:" "$SECURE_BOOT"
     fi
     printf -v b '%s  %-22s %s\n' "$b" "Virtual machine:" "$vm"
-    if [[ $IS_APPLE == "yes" ]]; then
+    if [ "$IS_APPLE" = "yes" ]; then
         printf -v b '%s  %-22s %s\n' "$b" "Apple Mac:" "${MAC_MODEL:-yes}"
     fi
     printf -v b '%s  %-22s %s\n' "$b" "Laptop:" "$IS_LAPTOP"
     printf -v b '%s  %-22s %s\n' "$b" "Wi-Fi adapter:" "$HAS_WIFI"
+    case "$BCM_WIFI" in
+        wl) printf -v b '%s  %-22s %s\n' "$b" "" "(Broadcom, needs the wl driver)" ;;
+        b43) printf -v b '%s  %-22s %s\n' "$b" "" "(Broadcom, needs b43 firmware)" ;;
+    esac
     printf -v b '%s  %-22s %s\n' "$b" "Bluetooth adapter:" "$HAS_BT"
-    if (( ${#GPU_NAMES[@]} == 0 )); then
+    if [ "${#GPU_NAMES[@]}" -eq 0 ]; then
         printf -v b '%s  %-22s %s\n' "$b" "Graphics:" "none detected"
     else
         for g in "${GPU_NAMES[@]}"; do
@@ -312,14 +417,22 @@ show_hardware() {
         done
     fi
     say_pre "${b%$'\n'}"
-    if [[ $BOOT_MODE == "uefi" && $UEFI_BITS == "32" ]]; then
-        die "This machine has 32-bit UEFI firmware, which this installer does not support. Boot the live image in legacy BIOS (CSM) mode instead, if the firmware allows it."
+    if [ "$BOOT_MODE" = "uefi" ] && [ "$UEFI_BITS" = "32" ]; then
+        if [ "$IS_APPLE" = "yes" ]; then
+            die "This Mac has 32-bit EFI firmware, which this installer cannot make bootable. Nothing on disk has been changed."
+        fi
+        say "This computer has 32-bit UEFI firmware with a 64-bit CPU (common on Intel Atom tablets and small laptops from around 2014). The installer uses GRUB's 32-bit EFI version for it, which starts the normal 64-bit Gentoo kernel. systemd-boot is not offered on this firmware."
     fi
-    if [[ $SECURE_BOOT == "on" ]]; then
+    if [ "$SECURE_BOOT" = "on" ]; then
         warn "Secure Boot is enabled in your firmware."
         say "This installer does not sign the kernel or bootloader, so the installed system will not boot while Secure Boot is on. Disable Secure Boot in the firmware setup before rebooting into Gentoo (you can set up signing later; see the Gentoo wiki page 'Secure Boot')."
     fi
-    if [[ $BOOT_MODE == "bios" && $IS_APPLE != "yes" ]]; then
+    if [ "$HAS_T2" = "yes" ]; then
+        warn "This Mac has an Apple T2 chip (most Macs from 2018 to 2020)."
+        say "Gentoo's kernel does not support the T2's built-in keyboard, trackpad, Wi-Fi, audio and Touch Bar; those need the patched kernel from the t2linux project. Use a USB keyboard and a wired or USB network connection, and expect those devices to stay off after installing until you set up the t2linux kernel (see wiki.t2linux.org)." \
+            "Also allow booting from external media and other operating systems: start the Mac holding Command+R, open Startup Security Utility, and set Secure Boot to 'No Security'."
+    fi
+    if [ "$BOOT_MODE" = "bios" ] && [ "$IS_APPLE" != "yes" ]; then
         say "The live image was started in legacy BIOS mode. If this computer supports UEFI (almost everything made after 2012 does), consider rebooting the live image in UEFI mode first: it is the more modern and better supported setup. Continuing in BIOS mode works too (GRUB is used)."
     fi
     pause
@@ -338,31 +451,34 @@ mac_has_32bit_efi() {
 
 # Intel Macs choose between legacy (BIOS) and EFI boot from the partition table:
 # they only boot a disk in legacy mode if it has an MBR (or hybrid MBR)
-# partition table with a partition marked bootable. This installer uses GPT, so
-# on a Mac a BIOS-mode installation does not boot (the Mac shows a flashing
-# folder). When the live system was started in BIOS mode on a Mac (Ventoy's EFI
-# mode does not start on some Macs, for example), install for EFI instead. The
-# bootloader then goes to the fallback path EFI/BOOT/BOOTX64.EFI, which works
-# without access to the firmware's boot menu from the live system.
+# partition table with a partition marked bootable. When the live system was
+# started in BIOS mode on a Mac (Ventoy's EFI mode does not start on some Macs,
+# for example), install for EFI instead. The bootloader then goes to the
+# fallback path EFI/BOOT/BOOTX64.EFI, which works without access to the
+# firmware's boot menu from the live system. A BIOS-mode install on a Mac gets
+# an MBR partition table, which the Mac's legacy boot needs.
 mac_boot_check() {
     local target
-    if [[ $IS_APPLE != "yes" || $BOOT_MODE != "bios" ]]; then return 0; fi
+    if [ "$IS_APPLE" != "yes" ] || [ "$BOOT_MODE" != "bios" ]; then return 0; fi
     section "Apple Mac started in BIOS mode"
     if mac_has_32bit_efi "$MAC_MODEL"; then
-        die "This Mac (${MAC_MODEL}) has 32-bit EFI firmware. This installer supports only 64-bit EFI, and Macs do not boot a BIOS-mode installation from a GPT disk, which is what this installer creates, so it cannot produce a system that boots on this Mac. Nothing on disk has been changed."
+        say "This Mac (${MAC_MODEL}) has 32-bit EFI firmware, which this installer cannot boot. It can still install in BIOS mode with an MBR partition table, which these Macs start through their legacy boot support."
+        PTABLE="mbr"
+        return 0
     fi
     say "This is an Apple Mac${MAC_MODEL:+ (${MAC_MODEL})}, and the live system was started in legacy BIOS mode. That is common with Ventoy, whose EFI mode does not start on some Macs." \
-        "Macs only boot a BIOS-mode installation from a disk with an MBR partition table. This installer uses a GPT partition table, so a BIOS-mode installation would not start: the Mac would show a flashing folder with a question mark." \
+        "Macs only boot a BIOS-mode installation from a disk with an MBR partition table, and the Mac's legacy boot is slow and lacks some features (for example, the screen brightness keys may not work)." \
         "Instead, the installer can set up the new system for EFI, the Mac's native boot mode, even though the live system runs in BIOS mode. The bootloader is then placed at the standard fallback location that the Mac finds by itself. If it does not start automatically, hold the Option key while the Mac starts and choose 'EFI Boot'."
     choose target "How should the new system start?" "uefi" \
         "uefi|Install for EFI, the Mac's native boot mode (recommended)" \
-        "bios|Install for BIOS anyway (the Mac will not start it without extra manual steps)"
-    if [[ $target == "uefi" ]]; then
+        "bios|Install for BIOS with an MBR partition table (legacy boot)"
+    if [ "$target" = "uefi" ]; then
         BOOT_MODE="uefi"
         UEFI_BITS="64"
         ok "The new system will be installed for EFI."
     else
-        warn "Installing for BIOS on a GPT disk: this Mac will not start it unless you add something like a hybrid MBR yourself."
+        PTABLE="mbr"
+        ok "The new system will be installed for BIOS, on an MBR partition table."
     fi
 }
 
@@ -371,25 +487,28 @@ live_media_disk() {
     local m src pk
     for m in /mnt/cdrom /run/initramfs/live /run/archiso/bootmnt /run/live/medium; do
         src=$(findmnt -no SOURCE "$m" 2>/dev/null || true)
-        [[ -n $src && -b $src ]] || continue
+        [ -n "$src" ] && [ -b "$src" ] || continue
         pk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -n1 || true)
-        if [[ -n $pk ]]; then echo "/dev/$pk"; else echo "$src"; fi
+        if [ -n "$pk" ]; then printf '/dev/%s\n' "$pk"; else printf '%s\n' "$src"; fi
         return 0
     done
     return 0
 }
 
+# Whole disks that can be installed to. Leaves out optical drives, RAM and
+# loop devices, eMMC boot and RPMB areas, read-only and empty devices.
 list_disks() {
-    lsblk -dpno NAME,TYPE 2>/dev/null | awk '$2=="disk" {print $1}' \
-        | grep -Ev '^/dev/(loop|sr|zram|ram|fd)' || true
+    LC_ALL=C lsblk -dpno NAME,TYPE,RO,SIZE -b 2>/dev/null \
+        | awk '$2 == "disk" && $3 == "0" && $4 > 0 {print $1}' \
+        | grep -Ev '^/dev/(loop|sr|zram|ram|fd|nbd)|^/dev/mmcblk[0-9]+(boot[0-9]+|rpmb)$' || true
 }
 
 # part_dev DISK N -> partition device path (handles nvme0n1p1, mmcblk0p1, sda1)
 part_dev() {
-    if [[ $1 =~ [0-9]$ ]]; then echo "${1}p${2}"; else echo "${1}${2}"; fi
+    if [[ $1 =~ [0-9]$ ]]; then printf '%sp%s\n' "$1" "$2"; else printf '%s%s\n' "$1" "$2"; fi
 }
 
 lsblk_field() {
     # lsblk_field FIELD DEVICE
-    lsblk -dno "$1" "$2" 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
+    LC_ALL=C lsblk -dno "$1" "$2" 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
 }
